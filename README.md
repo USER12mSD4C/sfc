@@ -131,3 +131,10 @@ cargo build --release
 # Run compatibility test harness
 ./test_sfc.sh
 ```
+
+## screenshots of shell and fasterfetch
+<img width="847" height="376" alt="image" src="https://github.com/user-attachments/assets/096ae275-bd31-4a5c-adfc-dfbf2779be3f" />
+<img width="561" height="85" alt="image" src="https://github.com/user-attachments/assets/71577a18-5973-406c-9699-f65e25e992f7" />
+<img width="612" height="80" alt="image" src="https://github.com/user-attachments/assets/3e99af95-d281-425f-94ec-1eaaef5057ea" />
+<img width="732" height="282" alt="image" src="https://github.com/user-attachments/assets/94be5d2d-45ba-4826-927a-785d08859238" />
+
