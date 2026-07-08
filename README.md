@@ -1,6 +1,6 @@
-# SFC — Simple & Fast Coreutils in Rust
+# SFC — Simple & Fast Coreutils re-written in Rust
 
-**SFC** is a high-performance, lightweight suite of core system utilities and an interactive command-line shell written from scratch in Rust. It is designed to minimize process-spawning latency, optimize disk footprint, and streamline the daily workflow of systems and OS developers.
+**SFC** is a high-performance, lightweight suite of core system utilities and an interactive command-line shell written from scratch in Rust. It is designed to minimize process-spawning latency and optimize disk footprint.
 
 SFC integrates into the operating system using a hybrid fallback model: your own optimized Rust binaries take precedence over standard utilities in the user's `$PATH`, while any unimplemented commands are transparently loaded from the default GNU Coreutils, preserving overall system stability.
 
@@ -16,6 +16,8 @@ A custom interactive command-line shell built on top of `rustyline`, optimized f
 * **Context-Aware Tab Completion:**
   * Detects command modifiers (such as `sudo`, `doas`, `stdbuf`, `nohup`) and automatically suggests system executables instead of local files, even when typed at secondary argument positions.
   * Smart relative and absolute path completion, dynamically appending trailing slashes `/` for directories to allow continuous tab navigation.
+
+* don't worry, you can use it even without **sfshell**
 
 ### 2. Custom High-Performance Utilities
 * **`fsearch` (Micro-Ripgrep):** Recursively searches for substrings in text files, automatically ignoring heavy compilation and version control directories (`.git`, `target`, `node_modules`) to maintain extreme speeds, with matched patterns highlighted in pink.
@@ -120,21 +122,8 @@ Upon launching a new terminal emulator window, you will automatically enter your
 
 ---
 
-## Compatibility Testing (Byte-by-Byte)
-
-A test script `test_sfc.sh` is provided in the repository root. It automatically retrieves pristine GNU Coreutils binaries from your local Nix store and compares them against your compiled Rust utilities byte-by-byte using the `cmp` command, checking both standard output and POSIX exit codes:
-
-```bash
-# Compile release binaries
-cargo build --release
-
-# Run compatibility test harness
-./test_sfc.sh
-```
-
 ## screenshots of shell and fasterfetch
 <img width="847" height="376" alt="image" src="https://github.com/user-attachments/assets/096ae275-bd31-4a5c-adfc-dfbf2779be3f" />
 <img width="561" height="85" alt="image" src="https://github.com/user-attachments/assets/71577a18-5973-406c-9699-f65e25e992f7" />
 <img width="612" height="80" alt="image" src="https://github.com/user-attachments/assets/3e99af95-d281-425f-94ec-1eaaef5057ea" />
 <img width="732" height="282" alt="image" src="https://github.com/user-attachments/assets/94be5d2d-45ba-4826-927a-785d08859238" />
-
