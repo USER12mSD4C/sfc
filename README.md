@@ -26,6 +26,7 @@ A custom interactive command-line shell built on top of `rustyline`, optimized f
 * **`clip` (Unified Clipboard Bridge):** Automatically directs data to `wl-copy`/`wl-paste` in Wayland or `xclip` in X11. When running on remote servers (SSH, tmux), it utilizes the **OSC 52** protocol to encode clipboard data in Base64 and pipe it back to your local machine.
 * **`port` (lsof -i replacement):** Instantly resolves which PID is listening on a specific TCP/UDP port. It parses `/proc/net/` tables and matches socket inodes against `/proc/*/fd/` descriptors in microseconds, without external dependencies.
 * **`fasterfetch`:** A systems-query fetch tool supporting Kitty terminal graphics protocol to render Base64 images, and performing hardware queries directly via the PCI bus (`/sys/bus/pci/devices/`) to identify discrete GPUs without relying on DRM.
+* **`cbench`:** simple command benching tool just for comparing GNUcoreutils with mine
 
 ---
 
