@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 #[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 
 use rustyline::completion::FilenameCompleter;
 use rustyline::error::ReadlineError;
@@ -15,7 +15,6 @@ use rustyline::highlight::{Highlighter, MatchingBracketHighlighter};
 use rustyline::{CompletionType, Config, Editor, Helper};
 
 // Реестр запущенных фоновых процессов, которые ДОЛЖНЫ получить SIGHUP при закрытии шелла.
-// Те, для которых вызван disown, удаляются отсюда и выживают.
 static mut ACTIVE_PIDS: [libc::pid_t; 1024] = [0; 1024];
 static mut ACTIVE_PIDS_LEN: usize = 0;
 
@@ -28,7 +27,7 @@ extern "C" fn handle_sighup(_sig: libc::c_int) {
                 libc::kill(pid, libc::SIGHUP);
             }
         }
-        libc::_exit(1); // Быстрый безопасный выход из обработчика сигналов
+        libc::_exit(1);
     }
 }
 
@@ -89,7 +88,6 @@ fn expand_env_vars(input: &str, last_exit_code: i32) -> String {
                     result.push_str(&val);
                 }
             } else if chars.peek() == Some(&'?') {
-                // Если встретили $?, подставляем код возврата
                 chars.next();
                 result.push_str(&last_exit_code.to_string());
             } else {
@@ -169,8 +167,6 @@ fn get_all_commands(aliases: &HashMap<String, String>) -> Vec<String> {
     cmds
 }
 
-// Измененная структура подсказки с явным разделением на чистый текст для автодополнения
-// и TrueColor-форматированный текст для вывода на экран.
 #[derive(Hash, Debug, PartialEq, Eq, Clone)]
 struct CommandHint {
     display: String,
@@ -184,6 +180,43 @@ impl rustyline::hint::Hint for CommandHint {
     fn completion(&self) -> Option<&str> {
         Some(&self.completion)
     }
+}
+
+// Вспомогательная функция для генерации подсказок по путям файлов/директорий
+fn get_file_hint(current_word: &str) -> Option<CommandHint> {
+    let expanded = expand_tilde(current_word);
+    let path = Path::new(&expanded);
+
+    let (dir_path, prefix) = if current_word.ends_with('/') {
+        (path, "")
+    } else if let Some(parent) = path.parent() {
+        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        (parent, file_name)
+    } else {
+        (Path::new("."), current_word)
+    };
+
+    if let Ok(entries) = fs::read_dir(dir_path) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with(prefix) && name_str != prefix {
+                if name_str.starts_with('.') && !prefix.starts_with('.') {
+                    continue;
+                }
+                let suffix = &name_str[prefix.len()..];
+                let mut hint_str = suffix.to_string();
+                if entry.path().is_dir() {
+                    hint_str.push('/');
+                }
+                return Some(CommandHint {
+                    display: format!("\x1b[38;2;90;90;90m{}\x1b[0m", hint_str),
+                    completion: hint_str,
+                });
+            }
+        }
+    }
+    None
 }
 
 struct SFHelper {
@@ -204,20 +237,16 @@ impl rustyline::completion::Completer for SFHelper {
     ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
         let trimmed = &line[..pos];
 
-        // Находим границы текущего слова, которое вводит пользователь
         let (start_of_word, current_word) = match trimmed.rfind(' ') {
             Some(idx) => (idx + 1, &trimmed[idx + 1..]),
             None => (0, trimmed),
         };
 
-        // Анализируем контекст перед текущим словом
         let before_word = trimmed[..start_of_word].trim();
         let mut is_command_position = start_of_word == 0;
 
-        // Если это не первое слово, проверяем, не идет ли оно после sudo/doas/etc.
         if !is_command_position && !before_word.is_empty() {
             let words: Vec<&str> = before_word.split_whitespace().collect();
-            // Ищем последнее слово, не являющееся флагом (не начинается с '-')
             if let Some(last_non_flag) = words.iter().rev().find(|&&w| !w.starts_with('-')) {
                 if *last_non_flag == "sudo"
                     || *last_non_flag == "doas"
@@ -229,8 +258,15 @@ impl rustyline::completion::Completer for SFHelper {
             }
         }
 
-        // Сценарий 1: Мы находимся в позиции ввода команды (начало строки или после sudo)
         if is_command_position {
+            // Если ввод команды начинается с пути (./, /, ~), переключаемся на автодополнение файлов
+            if current_word.starts_with('.')
+                || current_word.starts_with('/')
+                || current_word.starts_with('~')
+            {
+                return self.completer.complete(line, pos, ctx);
+            }
+
             let mut candidates = Vec::new();
             for cmd in &self.commands {
                 if cmd.starts_with(current_word) {
@@ -240,11 +276,9 @@ impl rustyline::completion::Completer for SFHelper {
                     });
                 }
             }
-            // Возвращаем start_of_word, чтобы заменить только команду после sudo, а не всю строку
             return Ok((start_of_word, candidates));
         }
 
-        // Сценарий 2: Обычные аргументы (пути к файлам/папкам)
         self.completer.complete(line, pos, ctx)
     }
 }
@@ -258,13 +292,11 @@ impl rustyline::hint::Hinter for SFHelper {
             return None;
         }
 
-        // Находим границы текущего слова
         let (start_of_word, current_word) = match trimmed.rfind(' ') {
             Some(idx) => (idx + 1, &trimmed[idx + 1..]),
             None => (0, trimmed),
         };
 
-        // Анализируем контекст перед текущим словом
         let before_word = trimmed[..start_of_word].trim();
         let mut is_command_position = start_of_word == 0;
 
@@ -281,8 +313,15 @@ impl rustyline::hint::Hinter for SFHelper {
             }
         }
 
-        // Сценарий 1: Подсказки для команд (первое слово или после sudo)
         if is_command_position {
+            // Если команда начинается как путь, возвращаем подсказку по путям
+            if current_word.starts_with('.')
+                || current_word.starts_with('/')
+                || current_word.starts_with('~')
+            {
+                return get_file_hint(current_word);
+            }
+
             for cmd in &self.commands {
                 if cmd.starts_with(current_word) && cmd != current_word {
                     let hint_str = cmd[current_word.len()..].to_string();
@@ -295,41 +334,7 @@ impl rustyline::hint::Hinter for SFHelper {
             return None;
         }
 
-        // Сценарий 2: Подсказки путей к файлам/папкам
-        let expanded = expand_tilde(current_word);
-        let path = Path::new(&expanded);
-
-        let (dir_path, prefix) = if current_word.ends_with('/') {
-            (path, "")
-        } else if let Some(parent) = path.parent() {
-            let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            (parent, file_name)
-        } else {
-            (Path::new("."), current_word)
-        };
-
-        if let Ok(entries) = fs::read_dir(dir_path) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str.starts_with(prefix) && name_str != prefix {
-                    // Игнорируем скрытые файлы, если пользователь сам не начал писать "."
-                    if name_str.starts_with('.') && !prefix.starts_with('.') {
-                        continue;
-                    }
-                    let suffix = &name_str[prefix.len()..];
-                    let mut hint_str = suffix.to_string();
-                    if entry.path().is_dir() {
-                        hint_str.push('/');
-                    }
-                    return Some(CommandHint {
-                        display: format!("\x1b[38;2;90;90;90m{}\x1b[0m", hint_str),
-                        completion: hint_str,
-                    });
-                }
-            }
-        }
-        None
+        get_file_hint(current_word)
     }
 }
 
@@ -403,7 +408,6 @@ fn tokenize(input: &str) -> Vec<Token> {
             in_quotes = true;
             quote_char = c;
         } else if c == '#' && current.is_empty() {
-            // Пропускаем символы комментария только до конца текущей строки
             while let Some(&next_c) = chars.peek() {
                 if next_c == '\n' {
                     break;
@@ -645,9 +649,9 @@ fn execute_pipeline(
             continue;
         }
 
-        if len == 1 {
-            let first_arg = &cmd.args[0];
+        let first_arg = &cmd.args[0];
 
+        if len == 1 {
             if first_arg == "cd" {
                 let dest = cmd.args.get(1).map(|s| s.as_str()).unwrap_or("~");
                 let dest_path = if dest == "~" {
@@ -894,7 +898,21 @@ fn execute_pipeline(
         match child.wait() {
             Ok(status) => {
                 if idx == len - 1 {
-                    last_status = status.code().unwrap_or(0);
+                    // Корректная обработка кода возврата:
+                    // Если процесс завершился нормально, берем его код.
+                    // Если процесс аварийно завершился по сигналу, вычисляем как 128 + номер_сигнала.
+                    last_status = if let Some(code) = status.code() {
+                        code
+                    } else {
+                        #[cfg(unix)]
+                        {
+                            status.signal().map(|sig| 128 + sig).unwrap_or(1)
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            1
+                        }
+                    };
                 }
             }
             Err(e) => {
@@ -992,7 +1010,7 @@ fn load_sfsrc(jobs: &mut Vec<Job>) -> HashMap<String, String> {
                         .trim_matches('"')
                         .trim_matches('\'')
                         .to_string();
-                    let expanded_val = expand_env_vars(&val, 0); // Передаем 0
+                    let expanded_val = expand_env_vars(&val, 0);
                     aliases.insert(key, expanded_val);
                 }
             } else if trimmed.starts_with("export ") {
@@ -1004,12 +1022,12 @@ fn load_sfsrc(jobs: &mut Vec<Job>) -> HashMap<String, String> {
                         .trim_matches('"')
                         .trim_matches('\'')
                         .to_string();
-                    let expanded_val = expand_env_vars(&val, 0); // Передаем 0
+                    let expanded_val = expand_env_vars(&val, 0);
                     env::set_var(key, expanded_val);
                 }
             } else {
                 let expanded_line = expand_alias(trimmed, &aliases);
-                let expanded_with_env = expand_env_vars(&expanded_line, 0); // Передаем 0
+                let expanded_with_env = expand_env_vars(&expanded_line, 0);
                 let tokens = tokenize(&expanded_with_env);
                 let groups = parse_pipeline_groups(&tokens);
                 execute_groups(groups, jobs);

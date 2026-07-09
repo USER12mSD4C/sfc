@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 rustyline = "14.0.0"
 libc = "0.2"
+memmap2 = "0.9"
+rayon = "1.10"
 
 # Указываем правильный путь к перенесенному файлу
 [[bin]]
