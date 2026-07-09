@@ -54,33 +54,62 @@ fn main() {
                 let pid = name_str.parse::<i32>().unwrap_or(0);
                 if pid == my_pid {
                     continue;
-                } // Защита от убийства самого себя (процесса killall)
+                } // Защита от убийства самого себя
 
                 // 1. Получаем усеченное имя (до 15 символов) из comm
                 let comm = fs::read_to_string(entry.path().join("comm")).ok();
                 let comm_trimmed = comm.as_deref().map(|s| s.trim()).unwrap_or("");
 
-                // 2. Получаем полное имя исполняемого файла из cmdline (чтобы избежать лимита в 15 символов)
+                // 2. Считываем полный cmdline
                 let cmdline = fs::read_to_string(entry.path().join("cmdline")).ok();
-                let cmdline_name = cmdline
+                let cmdline_args: Vec<String> = cmdline
                     .as_ref()
-                    .and_then(|c| {
-                        c.split('\0').next().and_then(|path_str| {
-                            if path_str.is_empty() {
-                                None
-                            } else {
-                                Path::new(path_str).file_name().and_then(|s| s.to_str())
-                            }
-                        })
-                    })
-                    .unwrap_or("");
+                    .map(|c| c.split('\0').map(|s| s.to_string()).collect())
+                    .unwrap_or_default();
 
                 for target in &target_names {
-                    let matches_comm = comm_trimmed == target;
-                    let matches_cmdline = !cmdline_name.is_empty() && cmdline_name == target;
+                    let mut matched = false;
 
-                    // Если совпало по любому из методов — убиваем
-                    if matches_comm || matches_cmdline {
+                    // А. Сравниваем с именем из comm (регистронезависимо)
+                    if comm_trimmed.to_lowercase() == target.to_lowercase() {
+                        matched = true;
+                    }
+
+                    // Б. Анализируем cmdline
+                    if !matched && !cmdline_args.is_empty() {
+                        let first_arg = &cmdline_args[0];
+                        if !first_arg.is_empty() {
+                            let exe_name = Path::new(first_arg)
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("");
+
+                            // Сравниваем сам исполняемый файл
+                            if exe_name.to_lowercase() == target.to_lowercase() {
+                                matched = true;
+                            } else if exe_name == "python"
+                                || exe_name == "python3"
+                                || exe_name == "bash"
+                                || exe_name == "sh"
+                                || exe_name == "node"
+                                || exe_name == "appimage-run"
+                            {
+                                // Если первый аргумент — интерпретатор, проверяем второй аргумент (скрипт/приложение)
+                                if cmdline_args.len() > 1 {
+                                    let second_arg = &cmdline_args[1];
+                                    let script_name = Path::new(second_arg)
+                                        .file_name()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("");
+                                    if script_name.to_lowercase() == target.to_lowercase() {
+                                        matched = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if matched {
                         matched_any = true;
                         unsafe {
                             if libc::kill(pid, signal) < 0 {

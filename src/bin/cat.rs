@@ -1,75 +1,130 @@
 use std::env;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::fs;
+use std::path::Path;
 
-fn main() -> io::Result<()> {
-    let mut stdout = io::stdout().lock();
-    let args: Vec<_> = env::args_os().collect();
+fn parse_signal(arg: &str) -> Option<i32> {
+    if arg.starts_with('-') && arg.len() > 1 {
+        let sig = &arg[1..];
+        if let Ok(num) = sig.parse::<i32>() {
+            return Some(num);
+        }
+        match sig.to_uppercase().as_str() {
+            "KILL" | "SIGKILL" => Some(libc::SIGKILL),
+            "TERM" | "SIGTERM" => Some(libc::SIGTERM),
+            "HUP" | "SIGHUP" => Some(libc::SIGHUP),
+            "INT" | "SIGINT" => Some(libc::SIGINT),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
 
-    let mut number_lines = false;
-    let mut paths = Vec::new();
+fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    if args.is_empty() {
+        eprintln!("Usage: killall [-SIGNAL] <name> ...");
+        std::process::exit(1);
+    }
 
-    for arg in args.iter().skip(1) {
-        if arg == "-n" {
-            number_lines = true;
+    let mut signal = libc::SIGTERM;
+    let mut target_names = Vec::new();
+
+    for arg in args {
+        if let Some(sig) = parse_signal(&arg) {
+            signal = sig;
         } else {
-            paths.push(arg);
+            target_names.push(arg);
         }
     }
 
-    let mut line_counter = 1;
+    if target_names.is_empty() {
+        eprintln!("killall: no process name specified");
+        std::process::exit(1);
+    }
 
-    if paths.is_empty() {
-        let stdin = io::stdin();
-        process_reader(stdin.lock(), &mut stdout, number_lines, &mut line_counter)?;
-    } else {
-        for path in paths {
-            let file = match File::open(path) {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("sfcat: {}: {}", path.to_string_lossy(), e);
+    let mut matched_any = false;
+    let my_pid = unsafe { libc::getpid() };
+
+    if let Ok(entries) = fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.chars().all(|c| c.is_ascii_digit()) {
+                let pid = name_str.parse::<i32>().unwrap_or(0);
+                if pid == my_pid {
                     continue;
-                }
-            };
+                } // Защита от убийства самого себя
 
-            if number_lines {
-                let reader = BufReader::new(file);
-                process_reader(reader, &mut stdout, number_lines, &mut line_counter)?;
-            } else {
-                let mut raw_file = file;
-                let mut buffer = [0u8; 16384];
-                loop {
-                    let n = raw_file.read(&mut buffer)?;
-                    if n == 0 {
-                        break;
+                // 1. Получаем усеченное имя (до 15 символов) из comm
+                let comm = fs::read_to_string(entry.path().join("comm")).ok();
+                let comm_trimmed = comm.as_deref().map(|s| s.trim()).unwrap_or("");
+
+                // 2. Считываем полный cmdline
+                let cmdline = fs::read_to_string(entry.path().join("cmdline")).ok();
+                let cmdline_args: Vec<String> = cmdline
+                    .as_ref()
+                    .map(|c| c.split('\0').map(|s| s.to_string()).collect())
+                    .unwrap_or_default();
+
+                for target in &target_names {
+                    let mut matched = false;
+
+                    // А. Сравниваем с именем из comm (без учета регистра)
+                    if comm_trimmed.to_lowercase() == target.to_lowercase() {
+                        matched = true;
                     }
-                    stdout.write_all(&buffer[..n])?;
+
+                    // Б. Анализируем cmdline
+                    if !matched && !cmdline_args.is_empty() {
+                        let first_arg = &cmdline_args[0];
+                        if !first_arg.is_empty() {
+                            let exe_name = Path::new(first_arg)
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("");
+
+                            // Сравниваем сам исполняемый файл без учета регистра
+                            if exe_name.to_lowercase() == target.to_lowercase() {
+                                matched = true;
+                            } else if exe_name == "python"
+                                || exe_name == "python3"
+                                || exe_name == "bash"
+                                || exe_name == "sh"
+                                || exe_name == "node"
+                                || exe_name == "appimage-run"
+                            {
+                                // Если первый аргумент — интерпретатор/обертка, проверяем имя запускаемого скрипта
+                                if cmdline_args.len() > 1 {
+                                    let second_arg = &cmdline_args[1];
+                                    let script_name = Path::new(second_arg)
+                                        .file_name()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("");
+                                    if script_name.to_lowercase() == target.to_lowercase() {
+                                        matched = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if matched {
+                        matched_any = true;
+                        unsafe {
+                            if libc::kill(pid, signal) < 0 {
+                                let err = std::io::Error::last_os_error();
+                                eprintln!("killall: {}({}): {}", target, pid, err);
+                            }
+                        }
+                    }
                 }
             }
         }
     }
-    Ok(())
-}
 
-fn process_reader<R: BufRead, W: Write>(
-    mut reader: R,
-    writer: &mut W,
-    number_lines: bool,
-    line_counter: &mut usize,
-) -> io::Result<()> {
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        let n = reader.read_until(b'\n', &mut line)?;
-        if n == 0 {
-            break;
-        }
-
-        if number_lines {
-            write!(writer, "{:6}\t", line_counter)?;
-            *line_counter += 1;
-        }
-        writer.write_all(&line)?;
+    if !matched_any {
+        eprintln!("killall: no process found");
+        std::process::exit(1);
     }
-    Ok(())
 }
