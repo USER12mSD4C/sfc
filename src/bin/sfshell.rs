@@ -5,6 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -372,6 +373,7 @@ enum Redirect {
     Stdin(String),
 }
 
+// FIX: восстановлена потерянная структура
 struct SimpleCommand {
     args: Vec<String>,
     redirects: Vec<Redirect>,
@@ -388,6 +390,7 @@ enum Token {
     RedirectOut,
     RedirectAppend,
     RedirectIn,
+    Heredoc(String),
 }
 
 fn tokenize(input: &str) -> Vec<Token> {
@@ -469,7 +472,32 @@ fn tokenize(input: &str) -> Vec<Token> {
                 tokens.push(Token::Word(current.clone()));
                 current.clear();
             }
-            tokens.push(Token::RedirectIn);
+            if chars.peek() == Some(&'<') {
+                chars.next();
+                while let Some(&next_c) = chars.peek() {
+                    if next_c.is_whitespace() {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                let mut delim = String::new();
+                while let Some(&next_c) = chars.peek() {
+                    if next_c.is_whitespace()
+                        || next_c == '|'
+                        || next_c == '&'
+                        || next_c == ';'
+                        || next_c == '<'
+                        || next_c == '>'
+                    {
+                        break;
+                    }
+                    delim.push(chars.next().unwrap());
+                }
+                tokens.push(Token::Heredoc(delim));
+            } else {
+                tokens.push(Token::RedirectIn);
+            }
         } else {
             current.push(c);
         }
@@ -534,6 +562,16 @@ fn parse_pipeline_groups(tokens: &[Token]) -> Vec<PipelineGroup> {
                     if let Token::Word(path) = &tokens[i + 1] {
                         let expanded = expand_tilde(path);
                         current_redirects.push(Redirect::StdoutAppend(expanded));
+                        i += 2;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+            Token::Heredoc(_path) => {
+                if i + 1 < tokens.len() {
+                    if let Token::Word(tmp_path) = &tokens[i + 1] {
+                        current_redirects.push(Redirect::Stdin(tmp_path.clone()));
                         i += 2;
                         continue;
                     }
@@ -625,6 +663,22 @@ fn reap_background_jobs(jobs: &mut Vec<Job>) {
     }
 }
 
+fn ends_with_continuation(s: &str) -> bool {
+    let trimmed = s.trim_end();
+    let backslash_count = trimmed.chars().rev().take_while(|&c| c == '\\').count();
+    backslash_count % 2 == 1
+}
+
+fn create_heredoc_file(content: &str) -> Result<String, String> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = format!("/tmp/sf_shell_heredoc_{}", timestamp);
+    fs::write(&path, content).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 fn execute_pipeline(
     pipeline: Vec<SimpleCommand>,
     background: bool,
@@ -686,8 +740,13 @@ fn execute_pipeline(
                 }
                 return Ok(0);
             } else if first_arg == "exit" {
+                let code = cmd
+                    .args
+                    .get(1)
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or(0);
                 cleanup_jobs_on_exit();
-                std::process::exit(0);
+                std::process::exit(code);
             } else if first_arg == "clear" {
                 print!("\x1b[H\x1b[2J\x1b[3J");
                 let _ = std::io::stdout().flush();
@@ -808,6 +867,15 @@ fn execute_pipeline(
             command.process_group(0);
         }
 
+        #[cfg(unix)]
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+                Ok(())
+            });
+        }
+
         let mut stdin_set = false;
         for redir in &cmd.redirects {
             if let Redirect::Stdin(path) = redir {
@@ -898,9 +966,6 @@ fn execute_pipeline(
         match child.wait() {
             Ok(status) => {
                 if idx == len - 1 {
-                    // Корректная обработка кода возврата:
-                    // Если процесс завершился нормально, берем его код.
-                    // Если процесс аварийно завершился по сигналу, вычисляем как 128 + номер_сигнала.
                     last_status = if let Some(code) = status.code() {
                         code
                     } else {
@@ -960,7 +1025,17 @@ fn get_prompt(last_exit_code: i32) -> String {
     } else {
         fs::read_to_string("/proc/sys/kernel/hostname")
             .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "nixos".to_string())
+            .unwrap_or_else(|_| {
+                let mut buf = [0u8; 256];
+                unsafe {
+                    if libc::gethostname(buf.as_mut_ptr() as *mut i8, buf.len()) == 0 {
+                        let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                        String::from_utf8_lossy(&buf[..len]).to_string()
+                    } else {
+                        "unknown".to_string()
+                    }
+                }
+            })
     };
 
     let current_dir = env::current_dir()
@@ -1079,8 +1154,8 @@ fn main() -> Result<(), ReadlineError> {
         let command_line = &args[2];
         let tokens = tokenize(command_line);
         let groups = parse_pipeline_groups(&tokens);
-        execute_groups(groups, &mut jobs);
-        return Ok(());
+        let code = execute_groups(groups, &mut jobs);
+        std::process::exit(code);
     }
 
     let aliases = load_sfsrc(&mut jobs);
@@ -1110,8 +1185,31 @@ fn main() -> Result<(), ReadlineError> {
     loop {
         reap_background_jobs(&mut jobs);
 
-        let prompt = get_prompt(last_exit_code);
-        let readline = rl.readline(&prompt);
+        let mut full_line = String::new();
+        let mut first_line = true;
+        let readline = loop {
+            let current_prompt = if first_line {
+                get_prompt(last_exit_code)
+            } else {
+                "\x1b[38;2;137;180;250m>>\x1b[0m ".to_string()
+            };
+            match rl.readline(&current_prompt) {
+                Ok(line) => {
+                    if ends_with_continuation(&line) {
+                        let trimmed = line.trim_end();
+                        full_line.push_str(&trimmed[..trimmed.len() - 1]);
+                        full_line.push(' ');
+                        first_line = false;
+                        continue;
+                    } else {
+                        full_line.push_str(&line);
+                        break Ok(full_line);
+                    }
+                }
+                Err(e) => break Err(e),
+            }
+        };
+
         match readline {
             Ok(line) => {
                 let trimmed = line.trim();
@@ -1127,9 +1225,68 @@ fn main() -> Result<(), ReadlineError> {
                 let expanded_alias = expand_alias(trimmed, &aliases);
                 let expanded_line = expand_env_vars(&expanded_alias, last_exit_code);
 
-                let tokens = tokenize(&expanded_line);
-                let groups = parse_pipeline_groups(&tokens);
+                let mut tokens = tokenize(&expanded_line);
+                let mut heredoc_map: HashMap<String, String> = HashMap::new();
+                let mut has_heredoc = false;
 
+                for token in &tokens {
+                    if let Token::Heredoc(delim) = token {
+                        has_heredoc = true;
+                        if !heredoc_map.contains_key(delim) {
+                            let mut content = String::new();
+                            loop {
+                                let hd_prompt = format!("{}> ", delim);
+                                match rl.readline(&hd_prompt) {
+                                    Ok(hline) => {
+                                        if hline.trim_end_matches('\n') == *delim {
+                                            break;
+                                        }
+                                        content.push_str(&hline);
+                                        content.push('\n');
+                                    }
+                                    Err(ReadlineError::Interrupted) => {
+                                        println!("^C");
+                                        content.clear();
+                                        break;
+                                    }
+                                    Err(ReadlineError::Eof) => break,
+                                    Err(err) => {
+                                        eprintln!("Error: {:?}", err);
+                                        break;
+                                    }
+                                }
+                            }
+                            heredoc_map.insert(delim.clone(), content);
+                        }
+                    }
+                }
+
+                if has_heredoc {
+                    let mut new_tokens = Vec::new();
+                    for token in tokens {
+                        match token {
+                            Token::Heredoc(delim) => {
+                                if let Some(content) = heredoc_map.get(&delim) {
+                                    match create_heredoc_file(content) {
+                                        Ok(path) => {
+                                            new_tokens.push(Token::RedirectIn);
+                                            new_tokens.push(Token::Word(path));
+                                        }
+                                        Err(e) => {
+                                            eprintln!("SF_Shell: heredoc error: {}", e);
+                                            new_tokens.push(Token::RedirectIn);
+                                            new_tokens.push(Token::Word("/dev/null".to_string()));
+                                        }
+                                    }
+                                }
+                            }
+                            other => new_tokens.push(other),
+                        }
+                    }
+                    tokens = new_tokens;
+                }
+
+                let groups = parse_pipeline_groups(&tokens);
                 last_exit_code = execute_groups(groups, &mut jobs);
             }
             Err(ReadlineError::Interrupted) => {
