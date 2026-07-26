@@ -183,7 +183,6 @@ impl rustyline::hint::Hint for CommandHint {
     }
 }
 
-// Вспомогательная функция для генерации подсказок по путям файлов/директорий
 fn get_file_hint(current_word: &str) -> Option<CommandHint> {
     let expanded = expand_tilde(current_word);
     let path = Path::new(&expanded);
@@ -260,7 +259,6 @@ impl rustyline::completion::Completer for SFHelper {
         }
 
         if is_command_position {
-            // Если ввод команды начинается с пути (./, /, ~), переключаемся на автодополнение файлов
             if current_word.starts_with('.')
                 || current_word.starts_with('/')
                 || current_word.starts_with('~')
@@ -315,7 +313,6 @@ impl rustyline::hint::Hinter for SFHelper {
         }
 
         if is_command_position {
-            // Если команда начинается как путь, возвращаем подсказку по путям
             if current_word.starts_with('.')
                 || current_word.starts_with('/')
                 || current_word.starts_with('~')

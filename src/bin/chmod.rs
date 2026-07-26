@@ -1,40 +1,79 @@
 use std::env;
 use std::fs;
-use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::process;
 
-fn main() -> io::Result<()> {
+fn main() {
     let args: Vec<_> = env::args_os().collect();
     if args.len() < 3 {
         eprintln!("Usage: chmod <mode> <file1> [file2 ...]");
-        std::process::exit(1);
+        process::exit(1);
     }
 
-    let mode_os = &args[1];
-    let mode_str = mode_os.to_string_lossy();
+    let mode_arg = &args[1];
     let files = &args[2..];
+    let mut exit_code = 0;
+
+    let mode_is_plus_x = mode_arg == "+x";
+    let mode_is_minus_x = mode_arg == "-x";
+
+    let octal_mode = if !mode_is_plus_x && !mode_is_minus_x {
+        let mode_str = match mode_arg.to_str() {
+            Some(s) => s,
+            None => {
+                eprintln!("chmod: invalid mode: argument is not valid UTF-8");
+                process::exit(1);
+            }
+        };
+        match u32::from_str_radix(mode_str, 8) {
+            Ok(v) => {
+                if v > 0o7777 {
+                    eprintln!("chmod: invalid mode: '{}'", mode_str);
+                    process::exit(1);
+                }
+                Some(v)
+            }
+            Err(_) => {
+                eprintln!("chmod: invalid mode: '{}'", mode_str);
+                process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
 
     for file in files {
         let path = Path::new(file);
-        let metadata = fs::metadata(path)?;
+
+        let metadata = match fs::metadata(path) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("chmod: cannot access '{}': {}", path.display(), e);
+                exit_code = 1;
+                continue;
+            }
+        };
+
         let mut perms = metadata.permissions();
         let current_mode = perms.mode();
 
-        let new_mode = if mode_str == "+x" {
+        let new_mode = if mode_is_plus_x {
             current_mode | 0o111
-        } else if mode_str == "-x" {
+        } else if mode_is_minus_x {
             current_mode & !0o111
-        } else if let Ok(octal) = u32::from_str_radix(&mode_str, 8) {
-            octal
         } else {
-            eprintln!("chmod: unsupported mode: {}", mode_str);
-            std::process::exit(1);
+            octal_mode.unwrap()
         };
 
         perms.set_mode(new_mode);
-        fs::set_permissions(path, perms)?;
+        if let Err(e) = fs::set_permissions(path, perms) {
+            eprintln!("chmod: changing permissions of '{}': {}", path.display(), e);
+            exit_code = 1;
+        }
     }
 
-    Ok(())
+    if exit_code != 0 {
+        process::exit(exit_code);
+    }
 }
