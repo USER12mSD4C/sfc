@@ -13,10 +13,6 @@ rustPlatform.buildRustPackage {
   # ОТКЛЮЧАЕМ ФАЗУ ТЕСТИРОВАНИЯ (сэкономит половину времени сборки пакета)
   doCheck = false;
 
-  postInstall = ''
-    ln -s test $out/bin/[
-  '';
-
   meta = {
     description = "SFC - Simple & Fast Coreutils in Rust";
     homepage = "https://github.com/user12msd4c/sfc";

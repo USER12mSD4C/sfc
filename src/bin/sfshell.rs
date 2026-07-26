@@ -373,7 +373,6 @@ enum Redirect {
     Stdin(String),
 }
 
-// FIX: восстановлена потерянная структура
 struct SimpleCommand {
     args: Vec<String>,
     redirects: Vec<Redirect>,
@@ -493,6 +492,13 @@ fn tokenize(input: &str) -> Vec<Token> {
                         break;
                     }
                     delim.push(chars.next().unwrap());
+                }
+                if delim.len() >= 2 {
+                    if (delim.starts_with('"') && delim.ends_with('"'))
+                        || (delim.starts_with('\'') && delim.ends_with('\''))
+                    {
+                        delim = delim[1..delim.len() - 1].to_string();
+                    }
                 }
                 tokens.push(Token::Heredoc(delim));
             } else {
@@ -669,14 +675,23 @@ fn ends_with_continuation(s: &str) -> bool {
     backslash_count % 2 == 1
 }
 
-fn create_heredoc_file(content: &str) -> Result<String, String> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = format!("/tmp/sf_shell_heredoc_{}", timestamp);
-    fs::write(&path, content).map_err(|e| e.to_string())?;
-    Ok(path)
+fn process_line_continuations(input: &str) -> String {
+    let mut result = String::new();
+    for line in input.lines() {
+        let trimmed = line.trim_end();
+        let backslash_count = trimmed.chars().rev().take_while(|&c| c == '\\').count();
+        if backslash_count % 2 == 1 {
+            result.push_str(&trimmed[..trimmed.len() - 1]);
+            result.push(' ');
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    if result.ends_with('\n') {
+        result.pop();
+    }
+    result
 }
 
 fn execute_pipeline(
@@ -1152,7 +1167,8 @@ fn main() -> Result<(), ReadlineError> {
     let args: Vec<String> = env::args().collect();
     if args.len() > 2 && args[1] == "-c" {
         let command_line = &args[2];
-        let tokens = tokenize(command_line);
+        let processed = process_line_continuations(command_line);
+        let tokens = tokenize(&processed);
         let groups = parse_pipeline_groups(&tokens);
         let code = execute_groups(groups, &mut jobs);
         std::process::exit(code);
@@ -1224,21 +1240,69 @@ fn main() -> Result<(), ReadlineError> {
 
                 let expanded_alias = expand_alias(trimmed, &aliases);
                 let expanded_line = expand_env_vars(&expanded_alias, last_exit_code);
+                let processed_line = process_line_continuations(&expanded_line);
 
-                let mut tokens = tokenize(&expanded_line);
                 let mut heredoc_map: HashMap<String, String> = HashMap::new();
-                let mut has_heredoc = false;
+                let mut processed_for_heredoc = String::new();
+                let lines: Vec<&str> = processed_line.lines().collect();
+                let mut i = 0;
 
+                while i < lines.len() {
+                    let line = lines[i];
+                    if let Some(pos) = line.find("<<") {
+                        processed_for_heredoc.push_str(&line[..pos + 2]);
+                        let after = line[pos + 2..].trim_start();
+                        let delim_raw = after.split_whitespace().next().unwrap_or("");
+                        let delim = delim_raw.trim_matches('"').trim_matches('\'');
+                        processed_for_heredoc.push_str(delim);
+                        processed_for_heredoc.push('\n');
+
+                        if !delim.is_empty() {
+                            let mut content = String::new();
+                            i += 1;
+                            while i < lines.len() {
+                                if lines[i].trim() == delim {
+                                    i += 1;
+                                    break;
+                                }
+                                content.push_str(lines[i]);
+                                content.push('\n');
+                                i += 1;
+                            }
+
+                            let timestamp = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_nanos();
+                            let path = format!("/tmp/sf_shell_heredoc_{}", timestamp);
+                            let _ = fs::write(&path, &content);
+                            heredoc_map.insert(delim.to_string(), path.clone());
+                            processed_for_heredoc.push_str("< ");
+                            processed_for_heredoc.push_str(&path);
+                            processed_for_heredoc.push('\n');
+                        } else {
+                            i += 1;
+                        }
+                    } else {
+                        processed_for_heredoc.push_str(line);
+                        processed_for_heredoc.push('\n');
+                        i += 1;
+                    }
+                }
+
+                let mut tokens = tokenize(&processed_for_heredoc);
+
+                let mut has_interactive_heredoc = false;
                 for token in &tokens {
                     if let Token::Heredoc(delim) = token {
-                        has_heredoc = true;
                         if !heredoc_map.contains_key(delim) {
+                            has_interactive_heredoc = true;
                             let mut content = String::new();
                             loop {
                                 let hd_prompt = format!("{}> ", delim);
                                 match rl.readline(&hd_prompt) {
                                     Ok(hline) => {
-                                        if hline.trim_end_matches('\n') == *delim {
+                                        if hline.trim() == *delim {
                                             break;
                                         }
                                         content.push_str(&hline);
@@ -1256,28 +1320,25 @@ fn main() -> Result<(), ReadlineError> {
                                     }
                                 }
                             }
-                            heredoc_map.insert(delim.clone(), content);
+                            let timestamp = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_nanos();
+                            let path = format!("/tmp/sf_shell_heredoc_{}", timestamp);
+                            let _ = fs::write(&path, &content);
+                            heredoc_map.insert(delim.to_string(), path);
                         }
                     }
                 }
 
-                if has_heredoc {
+                if !heredoc_map.is_empty() || has_interactive_heredoc {
                     let mut new_tokens = Vec::new();
                     for token in tokens {
                         match token {
                             Token::Heredoc(delim) => {
-                                if let Some(content) = heredoc_map.get(&delim) {
-                                    match create_heredoc_file(content) {
-                                        Ok(path) => {
-                                            new_tokens.push(Token::RedirectIn);
-                                            new_tokens.push(Token::Word(path));
-                                        }
-                                        Err(e) => {
-                                            eprintln!("SF_Shell: heredoc error: {}", e);
-                                            new_tokens.push(Token::RedirectIn);
-                                            new_tokens.push(Token::Word("/dev/null".to_string()));
-                                        }
-                                    }
+                                if let Some(path) = heredoc_map.get(&delim) {
+                                    new_tokens.push(Token::RedirectIn);
+                                    new_tokens.push(Token::Word(path.clone()));
                                 }
                             }
                             other => new_tokens.push(other),

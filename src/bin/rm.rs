@@ -8,14 +8,37 @@ fn main() -> io::Result<()> {
     let mut recursive = false;
     let mut force = false;
     let mut paths = Vec::new();
+    let mut seen_dash_dash = false;
 
     for arg in args.iter().skip(1) {
         let s = arg.to_string_lossy();
+
+        if seen_dash_dash {
+            paths.push(arg);
+            continue;
+        }
+
+        if s == "--" {
+            seen_dash_dash = true;
+            continue;
+        }
+
         if s.starts_with('-') && s != "-" {
             for c in s.chars().skip(1) {
                 match c {
                     'r' | 'R' => recursive = true,
                     'f' => force = true,
+                    '-' => {
+                        if s == "--force" {
+                            force = true;
+                        } else if s == "--recursive" {
+                            recursive = true;
+                        } else {
+                            eprintln!("rm: invalid option: {}", s);
+                            std::process::exit(1);
+                        }
+                        break;
+                    }
                     _ => {
                         eprintln!("rm: invalid option: -{}", c);
                         std::process::exit(1);
