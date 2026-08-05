@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 
 pub struct ShellVars {
@@ -9,6 +9,7 @@ pub struct ShellVars {
     pub last_bg_pid: u32,
     pub shell_pid: u32,
     pub opts: HashMap<char, bool>,
+    pub readonly: HashSet<String>,
     pub local_stack: Vec<HashMap<String, String>>,
 }
 
@@ -18,10 +19,12 @@ impl ShellVars {
         for (k, v) in env::vars() {
             exported.insert(k, v);
         }
+
         let mut opts = HashMap::new();
         opts.insert('e', false);
         opts.insert('u', false);
         opts.insert('x', false);
+
         Self {
             vars: HashMap::new(),
             exported,
@@ -30,6 +33,7 @@ impl ShellVars {
             last_bg_pid: 0,
             shell_pid: std::process::id(),
             opts,
+            readonly: HashSet::new(),
             local_stack: Vec::new(),
         }
     }
@@ -54,9 +58,24 @@ impl ShellVars {
                     .next()
                     .unwrap_or_else(|| "sfsh".to_string()),
             ),
-            _ if name.chars().all(|c| c.is_ascii_digit()) => {
+            "@" | "*" => {
+                if self.positional.is_empty() {
+                    Some(String::new())
+                } else {
+                    Some(self.positional.join(" "))
+                }
+            }
+            _ if name.chars().all(|c| c.is_ascii_digit()) && !name.is_empty() => {
                 let n: usize = name.parse().unwrap_or(0);
-                self.positional.get(n.saturating_sub(1)).cloned()
+                if n == 0 {
+                    Some(
+                        std::env::args()
+                            .next()
+                            .unwrap_or_else(|| "sfsh".to_string()),
+                    )
+                } else {
+                    self.positional.get(n.saturating_sub(1)).cloned()
+                }
             }
             _ => {
                 for frame in self.local_stack.iter().rev() {
@@ -73,7 +92,17 @@ impl ShellVars {
     }
 
     pub fn set(&mut self, name: &str, val: &str, export: bool) {
+        if self.readonly.contains(name) {
+            eprintln!("sfsh: {}: readonly variable", name);
+            return;
+        }
+
+        self.set_force(name, val, export);
+    }
+
+    pub fn set_force(&mut self, name: &str, val: &str, export: bool) {
         if export {
+            self.vars.remove(name);
             self.exported.insert(name.to_string(), val.to_string());
             env::set_var(name, val);
         } else {
@@ -83,25 +112,48 @@ impl ShellVars {
                     return;
                 }
             }
-            self.vars.insert(name.to_string(), val.to_string());
+
+            if self.exported.contains_key(name) {
+                self.exported.insert(name.to_string(), val.to_string());
+                env::set_var(name, val);
+            } else {
+                self.vars.insert(name.to_string(), val.to_string());
+            }
+        }
+    }
+
+    pub fn is_readonly(&self, name: &str) -> bool {
+        self.readonly.contains(name)
+    }
+
+    pub fn mark_readonly(&mut self, name: &str) {
+        self.readonly.insert(name.to_string());
+
+        if self.get(name).is_none() {
+            self.set_force(name, "", false);
         }
     }
 
     pub fn unset(&mut self, name: &str) {
+        if self.readonly.contains(name) {
+            eprintln!("sfsh: {}: readonly variable", name);
+            return;
+        }
+
         for frame in self.local_stack.iter_mut().rev() {
             frame.remove(name);
         }
+
         self.vars.remove(name);
         self.exported.remove(name);
         env::remove_var(name);
     }
 
     pub fn export(&mut self, name: &str) {
-        if let Some(v) = self.vars.get(name) {
+        if let Some(v) = self.vars.remove(name) {
             self.exported.insert(name.to_string(), v.clone());
-            env::set_var(name, v);
-        } else if self.exported.contains_key(name) {
-        } else {
+            env::set_var(name, &v);
+        } else if !self.exported.contains_key(name) {
             self.exported.insert(name.to_string(), String::new());
             env::set_var(name, "");
         }

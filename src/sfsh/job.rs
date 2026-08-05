@@ -70,10 +70,11 @@ impl JobTable {
         None
     }
 
-    pub fn background(&mut self, id: usize) {
-        if let Some(job) = self.jobs.get_mut(&id) {
-            kill(job.pgid, Signal::SIGCONT).ok();
-        }
+    pub fn background(&mut self, id: usize) -> Option<()> {
+        let job = self.jobs.get_mut(&id)?;
+        job.stopped = false;
+        kill(job.pgid, Signal::SIGCONT).ok();
+        Some(())
     }
 
     pub fn mark_done(&mut self, id: usize, status: i32) {

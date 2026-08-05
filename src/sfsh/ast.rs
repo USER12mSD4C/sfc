@@ -32,7 +32,7 @@ pub enum Redirect {
     Out(Option<u32>, Word),
     In(Option<u32>, Word),
     Append(Option<u32>, Word),
-    Here(Option<u32>, Word, bool),
+    Here(Option<u32>, Word, bool, bool, Option<String>),
     DupOut(Option<u32>, Word),
     DupIn(Option<u32>, Word),
     ReadWrite(Option<u32>, Word),
@@ -40,7 +40,7 @@ pub enum Redirect {
 
 #[derive(Debug, Clone)]
 pub enum Command {
-    Simple(Vec<Word>, Vec<Redirect>),
+    Simple(Vec<(String, Word)>, Vec<Word>, Vec<Redirect>),
     Pipeline(Vec<Command>),
     List(Vec<(Command, Option<String>)>),
     If(Box<Command>, Box<Command>, Option<Box<Command>>),
