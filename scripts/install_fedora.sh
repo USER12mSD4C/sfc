@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,21 +18,27 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     exit 1
 fi
 
-sudo rpm -e --nodeps coreutils
-
+TMPDIR=$(mktemp -d)
 for bin in *; do
     if [ -f "$bin" ] && [ -x "$bin" ] && [[ ! "$bin" =~ \.[a-z]+$ ]]; then
-        sudo cp "$bin" "/usr/bin/$bin"
+        /usr/bin/cp "$bin" "$TMPDIR/$bin"
     fi
 done
 
-ln -sf ls /usr/bin/dir
-ln -sf ls /usr/bin/vdir
-ln -sf touch /usr/bin/mk
-ln -sf id /usr/bin/whoami
+ln -sf ls "$TMPDIR/dir"
+ln -sf ls "$TMPDIR/vdir"
+ln -sf touch "$TMPDIR/mk"
+ln -sf id "$TMPDIR/whoami"
+
+sudo rpm -e --nodeps coreutils
+
+for bin in "$TMPDIR"/*; do
+    binname=$(basename "$bin")
+    sudo /usr/bin/install -m 755 "$bin" "/usr/bin/$binname"
+done
 
 sudo ln -sf /usr/bin/sfsh /bin/sh
 
+rm -rf "$TMPDIR"
+
 echo "Installation complete."
-echo "If dnf5 is broken, you can restore coreutils with:"
-echo "  sudo dnf install coreutils"
