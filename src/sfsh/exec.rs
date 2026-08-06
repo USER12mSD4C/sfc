@@ -372,6 +372,7 @@ fn is_shell_builtin(name: &str) -> bool {
             | "readonly"
             | "times"
             | "getopts"
+            | "lem"
     )
 }
 
@@ -751,12 +752,13 @@ fn execute_pipeline(
                         }
                     }
 
-                    eprintln!("sfsh: {}: {}", first, err);
-                    shell_exit(if err.raw_os_error() == Some(libc::ENOENT) {
-                        127
+                    if err.raw_os_error() == Some(libc::ENOENT) {
+                        eprintln!("sfsh: {}: command not found", first);
+                        shell_exit(127);
                     } else {
-                        126
-                    });
+                        eprintln!("sfsh: {}: {}", first, err);
+                        shell_exit(126);
+                    }
                 } else {
                     let code = match execute_command(
                         cmd, vars, aliases, funcs, jobs, shell_pgid, false, pgid,

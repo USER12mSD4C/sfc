@@ -1,85 +1,192 @@
+// src/bin/rm.rs
 use std::env;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::PathBuf;
+use std::process::ExitCode;
 
-fn main() -> io::Result<()> {
-    let args: Vec<_> = env::args_os().collect();
-    let mut recursive = false;
-    let mut force = false;
-    let mut paths = Vec::new();
-    let mut seen_dash_dash = false;
+const VERSION: &str = "rm (sfc coreutils) 0.1.0";
+const HELP: &str = "Usage: rm [OPTION]... [FILE]...\n\
+Remove (unlink) the FILE(s).\n\
+\n\
+  -f, --force                  ignore nonexistent files, never prompt\n\
+  -i, --interactive            prompt before every removal\n\
+  -I, --interactive=once       prompt once before removing more than three files\n\
+  -r, -R, --recursive          remove directories and their contents recursively\n\
+  -d, --dir                    remove empty directories\n\
+  -v, --verbose                explain what is being done\n\
+      --preserve-root          do not remove '/' (default)\n\
+      --no-preserve-root       do not treat '/' specially\n\
+      --help     display this help and exit\n\
+      --version  output version information and exit";
 
-    for arg in args.iter().skip(1) {
-        let s = arg.to_string_lossy();
+struct Options {
+    force: bool,
+    interactive: bool,
+    interactive_once: bool,
+    recursive: bool,
+    dir: bool,
+    verbose: bool,
+    preserve_root: bool,
+    paths: Vec<PathBuf>,
+}
 
-        if seen_dash_dash {
-            paths.push(arg);
-            continue;
-        }
+fn parse_args() -> Result<Options, String> {
+    let mut opts = Options {
+        force: false,
+        interactive: false,
+        interactive_once: false,
+        recursive: false,
+        dir: false,
+        verbose: false,
+        preserve_root: true,
+        paths: Vec::new(),
+    };
 
-        if s == "--" {
-            seen_dash_dash = true;
-            continue;
-        }
+    let mut args = env::args().skip(1);
+    let mut end_of_opts = false;
 
-        if s.starts_with('-') && s != "-" {
-            for c in s.chars().skip(1) {
+    while let Some(arg) = args.next() {
+        if !end_of_opts && arg.starts_with('-') && arg.len() > 1 {
+            if arg == "--" {
+                end_of_opts = true;
+                continue;
+            }
+            if arg == "--help" {
+                println!("{}", HELP);
+                std::process::exit(0);
+            }
+            if arg == "--version" {
+                println!("{}", VERSION);
+                std::process::exit(0);
+            }
+            if arg == "--preserve-root" {
+                opts.preserve_root = true;
+                continue;
+            }
+            if arg == "--no-preserve-root" {
+                opts.preserve_root = false;
+                continue;
+            }
+
+            for c in arg.chars().skip(1) {
                 match c {
-                    'r' | 'R' => recursive = true,
-                    'f' => force = true,
-                    '-' => {
-                        if s == "--force" {
-                            force = true;
-                        } else if s == "--recursive" {
-                            recursive = true;
-                        } else {
-                            eprintln!("rm: invalid option: {}", s);
-                            std::process::exit(1);
-                        }
-                        break;
+                    'f' => {
+                        opts.force = true;
+                        opts.interactive = false;
                     }
-                    _ => {
-                        eprintln!("rm: invalid option: -{}", c);
-                        std::process::exit(1);
+                    'i' => {
+                        opts.interactive = true;
+                        opts.force = false;
                     }
+                    'I' => {
+                        opts.interactive_once = true;
+                        opts.force = false;
+                    }
+                    'r' | 'R' => opts.recursive = true,
+                    'd' => opts.dir = true,
+                    'v' => opts.verbose = true,
+                    _ => return Err(format!("invalid option -- '{}'", c)),
                 }
             }
         } else {
-            paths.push(arg);
+            opts.paths.push(PathBuf::from(arg));
         }
     }
 
-    if paths.is_empty() {
-        if force {
-            return Ok(());
+    if opts.paths.is_empty() {
+        if opts.force {
+            return Ok(opts);
         }
-        eprintln!("Usage: rm [-rf] <file1> ...");
-        std::process::exit(1);
+        return Err("missing operand".into());
+    }
+    Ok(opts)
+}
+
+fn main() -> ExitCode {
+    let opts = match parse_args() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("rm: {}", e);
+            eprintln!("Try 'rm --help' for more information.");
+            return ExitCode::from(1);
+        }
+    };
+
+    if opts.interactive_once && opts.paths.len() > 3 {
+        eprint!("rm: remove {} arguments? ", opts.paths.len());
+        let mut ans = String::new();
+        io::stdin().read_line(&mut ans).unwrap_or(0);
+        if !ans.starts_with('y') && !ans.starts_with('Y') {
+            return ExitCode::from(0);
+        }
     }
 
-    for path in paths {
-        let path_ref = Path::new(&path);
-        let metadata = fs::symlink_metadata(path_ref);
-        match metadata {
-            Ok(meta) => {
-                if meta.is_dir() {
-                    if recursive {
-                        fs::remove_dir_all(path_ref)?;
+    let mut had_error = false;
+
+    for path in &opts.paths {
+        let path_str = path.to_string_lossy();
+        if opts.preserve_root && path_str == "/" {
+            eprintln!("rm: it is dangerous to operate recursively on '/'");
+            eprintln!("rm: use --no-preserve-root to override");
+            had_error = true;
+            continue;
+        }
+
+        let meta = fs::symlink_metadata(path);
+        match meta {
+            Ok(m) => {
+                if opts.interactive && !opts.force {
+                    eprint!(
+                        "rm: remove {} '{}'? ",
+                        if m.is_dir() { "directory" } else { "file" },
+                        path.display()
+                    );
+                    let mut ans = String::new();
+                    io::stdin().read_line(&mut ans).unwrap_or(0);
+                    if !ans.starts_with('y') && !ans.starts_with('Y') {
+                        continue;
+                    }
+                }
+
+                let res = if m.is_dir() {
+                    if opts.recursive {
+                        fs::remove_dir_all(path)
+                    } else if opts.dir {
+                        fs::remove_dir(path)
                     } else {
-                        eprintln!("rm: {}: Is a directory", path_ref.to_string_lossy());
-                        std::process::exit(1);
+                        eprintln!("rm: {}: Is a directory", path.display());
+                        had_error = true;
+                        continue;
                     }
                 } else {
-                    fs::remove_file(path_ref)?;
+                    fs::remove_file(path)
+                };
+
+                match res {
+                    Ok(_) => {
+                        if opts.verbose {
+                            println!("removed '{}'", path.display());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("rm: {}: {}", path.display(), e);
+                        had_error = true;
+                    }
                 }
             }
             Err(e) => {
-                if !force {
-                    return Err(e);
+                if !opts.force {
+                    eprintln!("rm: {}: {}", path.display(), e);
+                    had_error = true;
                 }
             }
         }
     }
-    Ok(())
+
+    if had_error {
+        ExitCode::from(1)
+    } else {
+        ExitCode::from(0)
+    }
 }

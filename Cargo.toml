@@ -10,38 +10,17 @@ memmap2 = "0.9"
 rayon = "1.10"
 nix = { version = "0.29", features = ["signal", "process", "term"] }
 
-# Указываем правильный путь к перенесенному файлу
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
 [[bin]]
 name = "touch"
 path = "src/touch_impl.rs"
 
 [[bin]]
-name = "mk"
-path = "src/touch_impl.rs"
-
-[profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true
-
-[[bin]]
 name = "id"
 path = "src/id_impl.rs"
-
-[[bin]]
-name = "whoami"
-path = "src/id_impl.rs"
-
-[[bin]]
-name = "ls"
-path = "src/bin/ls.rs"
-
-[[bin]]
-name = "dir"
-path = "src/bin/ls.rs"
-
-[[bin]]
-name = "vdir"
-path = "src/bin/ls.rs"

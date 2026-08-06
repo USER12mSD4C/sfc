@@ -139,7 +139,10 @@ impl Highlighter for SFHelper {
             return Cow::Borrowed(line);
         }
 
-        let mut parts = line.split_whitespace();
+        let trimmed = line.trim_start();
+        let leading = &line[..line.len() - trimmed.len()];
+
+        let mut parts = trimmed.split_whitespace();
         if let Some(first) = parts.next() {
             let valid = is_valid_cmd(first, &self.aliases, &self.commands);
             let color = if valid {
@@ -147,7 +150,8 @@ impl Highlighter for SFHelper {
             } else {
                 "\x1b[38;2;243;139;168m\x1b[1m"
             };
-            Cow::Owned(format!("{}{}\x1b[0m{}", color, first, &line[first.len()..]))
+            let rest = &trimmed[first.len()..];
+            Cow::Owned(format!("{}{}{}\x1b[0m{}", leading, color, first, rest))
         } else {
             self.highlighter.highlight(line, _pos)
         }
@@ -225,6 +229,30 @@ fn is_valid_cmd(cmd: &str, aliases: &HashMap<String, String>, commands: &[String
             | "false"
             | "printf"
             | "pwd"
+            | "command"
+            | "readonly"
+            | "times"
+            | "getopts"
+            | "lem"
+            | "if"
+            | "then"
+            | "else"
+            | "elif"
+            | "fi"
+            | "for"
+            | "while"
+            | "until"
+            | "do"
+            | "done"
+            | "case"
+            | "esac"
+            | "function"
+            | "in"
+            | "select"
+            | "time"
+            | "{"
+            | "}"
+            | "!"
     ) {
         return true;
     }
@@ -258,7 +286,9 @@ fn get_all_commands(aliases: &HashMap<String, String>) -> Vec<String> {
         "cd", "exit", "clear", "jobs", "disown", "unset", "export", "alias", "unalias", "source",
         "eval", "exec", "set", "shift", "read", "local", "test", "[", "hash", "type", "umask",
         "trap", "wait", "fg", "bg", "return", "break", "continue", "true", "false", "printf",
-        "echo", ":", ".", "pwd",
+        "echo", ":", ".", "pwd", "command", "readonly", "times", "getopts", "lem", "if", "then",
+        "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "function",
+        "in", "select", "time",
     ];
     let mut res: Vec<String> = cmds.into_iter().map(|s| s.to_string()).collect();
     for a in aliases.keys() {
@@ -351,7 +381,6 @@ fn get_prompt(vars: &ShellVars, ps2: bool) -> String {
     }
 
     let user = env::var("USER").unwrap_or_else(|_| "user".to_string());
-    let host = get_hostname();
     let dir = env::current_dir()
         .ok()
         .and_then(|p| {
@@ -371,6 +400,13 @@ fn get_prompt(vars: &ShellVars, ps2: bool) -> String {
         "\x1b[38;2;166;227;161m"
     } else {
         "\x1b[38;2;243;139;168m"
+    };
+
+    let lem_env = std::env::var("LEM_ENV").unwrap_or_default();
+    let host = if lem_env.is_empty() {
+        get_hostname().to_string()
+    } else {
+        lem_env
     };
 
     format!(

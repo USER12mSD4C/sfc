@@ -87,6 +87,7 @@ pub fn run_builtin(
         "readonly" => Some(ExecResult::Value(builtin_readonly(args, vars))),
         "times" => Some(ExecResult::Value(builtin_times())),
         "getopts" => Some(ExecResult::Value(builtin_getopts(args, vars))),
+        "lem" => Some(ExecResult::Value(builtin_lem(args))),
         _ => None,
     }
 }
@@ -214,14 +215,24 @@ fn builtin_alias(args: &[String], aliases: &mut HashMap<String, String>) -> i32 
 
     let mut rc = 0;
 
-    for arg in &args[1..] {
+    let mut i = 1;
+    while i < args.len() {
+        let arg = &args[i];
+
         if let Some((k, v)) = arg.split_once('=') {
             aliases.insert(k.to_string(), v.to_string());
+            i += 1;
+        } else if i + 1 < args.len() && args[i + 1].starts_with('=') {
+            let v = &args[i + 1][1..];
+            aliases.insert(arg.to_string(), v.to_string());
+            i += 2;
         } else if let Some(v) = aliases.get(arg) {
             println!("alias {}={}", arg, shell_quote(v));
+            i += 1;
         } else {
             eprintln!("alias: {}: not found", arg);
             rc = 1;
+            i += 1;
         }
     }
 
@@ -759,6 +770,7 @@ fn is_shell_builtin(name: &str) -> bool {
             | "readonly"
             | "times"
             | "getopts"
+            | "lem"
     )
 }
 
@@ -1501,5 +1513,15 @@ fn builtin_getopts(args: &[String], vars: &mut ShellVars) -> i32 {
         vars.set("__SFSH_OPTPOS", &pos.to_string(), false);
 
         return 0;
+    }
+}
+
+fn builtin_lem(args: &[String]) -> i32 {
+    match crate::sfsh::lem::lem_main(&args[1..]) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("lem: {}", e);
+            1
+        }
     }
 }

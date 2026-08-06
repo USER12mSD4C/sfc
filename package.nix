@@ -10,13 +10,20 @@ rustPlatform.buildRustPackage {
     lockFile = ./Cargo.lock;
   };
 
-  # ОТКЛЮЧАЕМ ФАЗУ ТЕСТИРОВАНИЯ (сэкономит половину времени сборки пакета)
   doCheck = false;
+
+  # Создаем симлинки после установки бинарей
+  postInstall = ''
+    ln -sf ls $out/bin/dir
+    ln -sf ls $out/bin/vdir
+    ln -sf touch $out/bin/mk
+    ln -sf id $out/bin/whoami
+  '';
 
   meta = {
     description = "SFC - Simple & Fast Coreutils in Rust";
     homepage = "https://github.com/user12msd4c/sfc";
     license = lib.licenses.mit;
-    mainProgram = "sfshell";
+    mainProgram = "sfsh"; # Исправлено с sfshell на sfsh
   };
 }

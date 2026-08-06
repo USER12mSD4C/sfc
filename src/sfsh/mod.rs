@@ -3,6 +3,7 @@ pub mod builtin;
 pub mod exec;
 pub mod expand;
 pub mod job;
+pub mod lem;
 pub mod lexer;
 pub mod main;
 pub mod parser;
