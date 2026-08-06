@@ -4,6 +4,8 @@
 
 SFC is a complete replacement for GNU Coreutils. It provides the same command-line interface and behavior, but is written in Rust for better performance and memory safety.
 
+## only nixOS and fedora is tested, try arch linux on your own risk
+
 ---
 
 ## Key Features

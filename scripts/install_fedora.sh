@@ -27,7 +27,7 @@ rpm -e --nodeps coreutils
 
 for bin in *; do
     if [ -f "$bin" ] && [ -x "$bin" ] && [[ ! "$bin" =~ \.[a-z]+$ ]]; then
-        ./cp "$bin" "/usr/bin/$bin"
+        cat "$bin" > "/usr/bin/$bin"
         ./chmod 755 "/usr/bin/$bin"
     fi
 done
