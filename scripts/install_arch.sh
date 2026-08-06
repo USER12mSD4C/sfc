@@ -22,3 +22,5 @@ ln -sf ls /usr/bin/dir
 ln -sf ls /usr/bin/vdir
 ln -sf touch /usr/bin/mk
 ln -sf id /usr/bin/whoami
+
+sudo ln -sf /usr/bin/sfsh /bin/sh
