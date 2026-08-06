@@ -185,15 +185,6 @@ fn get_packages() -> String {
         }
     }
 
-    if let Ok(output) = std::process::Command::new("rpm").arg("-qa").output() {
-        if output.status.success() {
-            let count = String::from_utf8_lossy(&output.stdout).lines().count();
-            if count > 0 {
-                counts.push(format!("{} (rpm)", count));
-            }
-        }
-    }
-
     if let Ok(content) = fs::read_to_string("/lib/apk/db/installed") {
         let count = content.matches("\nPackage: ").count();
         if count > 0 {
@@ -208,6 +199,12 @@ fn get_packages() -> String {
         }
     }
 
+    if let Some(count) = count_rpm() {
+        if count > 0 {
+            counts.push(format!("{} (rpm)", count));
+        }
+    }
+
     let mut nix_system = 0;
     if let Ok(entries) = fs::read_dir("/run/current-system/sw/bin") {
         nix_system = entries.count();
@@ -215,39 +212,15 @@ fn get_packages() -> String {
     let mut nix_user = 0;
     if let Ok(home) = env::var("HOME") {
         let user_path = format!("{}/.nix-profile/bin", home);
-        if let Ok(entries) = fs::read_dir(user_path) {
+        if let Ok(entries) = fs::read_dir(&user_path) {
             nix_user = entries.count();
         }
     }
     if nix_system > 0 || nix_user > 0 {
         if nix_user > 0 {
-            counts.push(format!(
-                "{} (nix-system), {} (nix-user)",
-                nix_system, nix_user
-            ));
+            counts.push(format!("{} (nix), {} (user)", nix_system, nix_user));
         } else {
-            counts.push(format!("{} (nix-system)", nix_system));
-        }
-    }
-
-    if let Ok(output) = std::process::Command::new("flatpak").arg("list").output() {
-        if output.status.success() {
-            let count = String::from_utf8_lossy(&output.stdout).lines().count();
-            if count > 0 {
-                counts.push(format!("{} (flatpak)", count));
-            }
-        }
-    }
-
-    if let Ok(output) = std::process::Command::new("snap").arg("list").output() {
-        if output.status.success() {
-            let count = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .count()
-                .saturating_sub(1);
-            if count > 0 {
-                counts.push(format!("{} (snap)", count));
-            }
+            counts.push(format!("{} (nix)", nix_system));
         }
     }
 
@@ -256,6 +229,19 @@ fn get_packages() -> String {
     } else {
         counts.join(", ")
     }
+}
+
+fn count_rpm() -> Option<u32> {
+    let bdb_path = "/var/lib/rpm/Packages";
+    if let Ok(data) = fs::read(bdb_path) {
+        if data.len() >= 32 {
+            let nrecs = u32::from_le_bytes([data[28], data[29], data[30], data[31]]);
+            if nrecs > 0 && nrecs < 200_000 {
+                return Some(nrecs);
+            }
+        }
+    }
+    None
 }
 
 fn get_gpu() -> String {

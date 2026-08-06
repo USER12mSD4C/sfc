@@ -23,20 +23,23 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     exit 1
 fi
 
-rpm -e --nodeps coreutils
+if rpm -q coreutils >/dev/null 2>&1; then
+    rpm -e --nodeps coreutils
+fi
 
 for bin in *; do
     if [ -f "$bin" ] && [ -x "$bin" ] && [[ ! "$bin" =~ \.[a-z]+$ ]]; then
+        ./rm -f "/usr/bin/$bin"
         ./dd if="$bin" of="/usr/bin/$bin" bs=4M 2>/dev/null
         ./chmod 755 "/usr/bin/$bin"
     fi
 done
 
-./ln -sf ls /usr/bin/dir
-./ln -sf ls /usr/bin/vdir
-./ln -sf touch /usr/bin/mk
-./ln -sf id /usr/bin/whoami
-
-./ln -sf /usr/bin/sfsh /bin/sh
+./rm -f /usr/bin/dir /usr/bin/vdir /usr/bin/mk /usr/bin/whoami /bin/sh
+./ln -s ls /usr/bin/dir
+./ln -s ls /usr/bin/vdir
+./ln -s touch /usr/bin/mk
+./ln -s id /usr/bin/whoami
+./ln -s /usr/bin/sfsh /bin/sh
 
 echo "Installation complete."
