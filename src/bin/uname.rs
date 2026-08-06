@@ -13,7 +13,6 @@ fn main() -> io::Result<()> {
     let mut show_hardware = false;
     let mut show_os = false;
 
-    // Парсим флаги, включая комбинированные (например, -srm)
     for arg in args {
         if arg.starts_with('-') && arg.len() > 1 {
             if arg.starts_with("--") {
@@ -57,7 +56,6 @@ fn main() -> io::Result<()> {
         }
     }
 
-    // Логика переопределения флагов
     let mut any_set = show_sysname
         || show_nodename
         || show_release
@@ -78,12 +76,10 @@ fn main() -> io::Result<()> {
         any_set = true;
     }
 
-    // Поведение по умолчанию (если запущен без флагов)
     if !any_set {
         show_sysname = true;
     }
 
-    // Системный вызов uname
     let mut uts = unsafe { std::mem::zeroed::<libc::utsname>() };
     if unsafe { libc::uname(&mut uts) } < 0 {
         return Err(io::Error::last_os_error());
@@ -95,14 +91,12 @@ fn main() -> io::Result<()> {
     let version = unsafe { std::ffi::CStr::from_ptr(uts.version.as_ptr()) }.to_string_lossy();
     let machine = unsafe { std::ffi::CStr::from_ptr(uts.machine.as_ptr()) }.to_string_lossy();
 
-    // На Linux x86_64 процессор и платформа соответствуют имени машины, а ОС — "GNU/Linux"
-    let processor = machine.clone();
-    let hardware = machine.clone();
+    let processor = "unknown";
+    let hardware = "unknown";
     let os = "GNU/Linux";
 
     let mut output = Vec::new();
 
-    // Заполняем строго в системном порядке POSIX/GNU
     if show_sysname {
         output.push(sysname.into_owned());
     }
@@ -119,22 +113,20 @@ fn main() -> io::Result<()> {
         output.push(machine.into_owned());
     }
 
-    // Скрываем "unknown" значения при сборке флага -a (как делает GNU uname)
     if show_processor {
         if !(show_all && processor == "unknown") {
-            output.push(processor.into_owned());
+            output.push(processor.to_string());
         }
     }
     if show_hardware {
         if !(show_all && hardware == "unknown") {
-            output.push(hardware.into_owned());
+            output.push(hardware.to_string());
         }
     }
     if show_os {
         output.push(os.to_string());
     }
 
-    // Печать через быстрый locked stdout
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{}", output.join(" "))?;
 

@@ -1,10 +1,12 @@
 use std::env;
 use std::path::Path;
+use std::process::ExitCode;
 
-fn main() {
+fn main() -> ExitCode {
     let args: Vec<_> = env::args_os().collect();
     if args.len() < 2 {
-        std::process::exit(1);
+        eprintln!("basename: missing operand");
+        return ExitCode::from(1);
     }
     let path = Path::new(&args[1]);
     println!(
@@ -13,4 +15,5 @@ fn main() {
             .map(|n| n.to_string_lossy())
             .unwrap_or_default()
     );
+    ExitCode::from(0)
 }

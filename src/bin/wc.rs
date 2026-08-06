@@ -155,6 +155,7 @@ fn print_stats<W: Write>(
     width: usize,
 ) -> io::Result<()> {
     let mut parts = Vec::new();
+
     if opts.lines {
         parts.push(format!("{:>width$}", stats.lines));
     }
@@ -215,6 +216,17 @@ fn main() -> ExitCode {
     if opts.files.is_empty() {
         let stdin = io::stdin();
         if let Ok(stats) = process(stdin.lock(), &opts) {
+            let max_val = stats
+                .lines
+                .max(stats.words)
+                .max(stats.bytes)
+                .max(stats.chars)
+                .max(stats.max_line_len);
+            let width = if max_val == 0 {
+                1
+            } else {
+                max_val.to_string().len()
+            };
             let _ = print_stats(&mut w, &stats, "", &opts, width);
         } else {
             had_error = true;

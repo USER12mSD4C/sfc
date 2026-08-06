@@ -11,6 +11,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -615,6 +616,25 @@ pub fn sfsh_main() -> Result<(), ReadlineError> {
             eprintln!("sfsh: {}: cannot open", file);
             shell_exit(127);
         }
+    }
+
+    let is_interactive = std::io::stdin().is_terminal();
+
+    if !is_interactive {
+        use std::io::Read;
+        let mut input = String::new();
+        std::io::stdin()
+            .read_to_string(&mut input)
+            .unwrap_or_default();
+        let code = execute_script(
+            &input,
+            &mut vars,
+            &mut aliases,
+            &mut funcs,
+            &mut jobs,
+            shell_pgid,
+        );
+        shell_exit(code);
     }
 
     load_sfsrc(&mut vars, &mut aliases, &mut funcs, &mut jobs, shell_pgid);

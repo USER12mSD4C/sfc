@@ -2,7 +2,7 @@
 
 **SFC** is a high-performance, lightweight suite of core system utilities and an interactive command-line shell written from scratch in Rust. It is designed to minimize process-spawning latency and optimize disk footprint.
 
-SFC integrates into the operating system using a hybrid fallback model: your own optimized Rust binaries take precedence over standard utilities in the user's `$PATH`, while any unimplemented commands are transparently loaded from the default GNU Coreutils, preserving overall system stability.
+SFC is a complete replacement for GNU Coreutils. It provides the same command-line interface and behavior, but is written in Rust for better performance and memory safety.
 
 ---
 
@@ -42,89 +42,88 @@ After a successful compilation, all binaries will be placed in the `target/relea
 
 ---
 
-## Declarative NixOS Installation
+## Installation
 
-SFC integrates into NixOS using package priority overrides (`lib.hiPrio`), allowing your custom utilities to safely shadow standard binaries in the global environment path without polluting the isolated compiler sandbox environments.
+SFC completely replaces the system coreutils. The installation scripts remove the original GNU coreutils package and install SFC binaries to `/usr/bin`.
 
-### 1. The Package Derivation (`package.nix`)
-Place this `package.nix` in your project root to handle compilation and automatic symbolic linking:
+**Warning:** This is a destructive operation. Make sure SFC passes all compatibility tests on your system before proceeding.
 
-```nix
-{ lib, rustPlatform }:
+### NixOS
 
-rustPlatform.buildRustPackage {
-  pname = "sfc";
-  version = "0.1.0";
+SFC integrates into NixOS using package priority overrides (`lib.hiPrio`), allowing your custom utilities to safely shadow standard binaries in the global environment path:
 
-  src = ./.;
-
-  cargoLock = {
-    lockFile = ./Cargo.lock;
-  };
-
-  # Disable check phase to skip cargo tests during system updates and save time
-  doCheck = false;
-
-  # Create a symbolic link for the standard POSIX shell bracket '['
-  postInstall = ''
-    ln -s test $out/bin/[
-  '';
-
-  meta = {
-    description = "SFC - Simple & Fast Coreutils in Rust";
-    homepage = "https://github.com/user12msd4c/sfc";
-    license = lib.licenses.mit;
-    mainProgram = "sfshell";
-  };
-}
+```bash
+scripts/install_nixos.sh
 ```
 
-### 2. Integration in `/etc/nixos/configuration.nix`
-Define your local package using an absolute path and assign it high priority in your system profile:
+Or manually add to your `configuration.nix`:
 
 ```nix
-{ config, pkgs, lib, ... }:
-
 let
-  # Compile SFC declaratively from your local directory
-  sfc = pkgs.callPackage /home/user12ms/Projects/sfc/package.nix {};
+  sfc = pkgs.callPackage /path/to/sfc/package.nix {};
 in
-
 {
-  # 1. Overlay sfc on top of the system PATH with higher priority
   environment.systemPackages = with pkgs; [
-    (lib.hiPrio sfc) # Your ls, cp, mv, etc. will shadow standard GNU versions
-    
-    git vim fastfetch gcc
-    # ... your other system packages ...
+    (lib.hiPrio sfc)
   ];
-
-  # 2. Register sfshell as a trusted login shell
-  environment.shells = [ "${sfc}/bin/sfshell" ];
-
-  # 3. Set sfshell as the default shell for your user
-  users.users.user12ms = {
-    isNormalUser = true;
-    shell = "${sfc}/bin/sfshell";
-    extraGroups = [ "video" "wheel" "networkmanager" "kvm" "dialout" ];
-  };
 }
 ```
 
-### 3. Activating the Environment
-
-Rebuild and activate the system:
+Then rebuild:
 
 ```bash
 sudo nixos-rebuild switch
 ```
 
-Upon launching a new terminal emulator window, you will automatically enter your lightweight `sfshell` environment with your custom `sfc` utilities active on the system PATH.
+### Arch Linux
+
+```bash
+scripts/install_arch.sh
+```
+
+This script:
+1. Installs build dependencies (`base-devel`, `rust`, `cargo`)
+2. Builds SFC from source
+3. Removes the system `coreutils` package
+4. Installs SFC binaries to `/usr/bin`
+
+### Fedora
+
+```bash
+scripts/install_fedora.sh
+```
+
+This script:
+1. Installs build dependencies (`gcc`, `cargo`, `rust`)
+2. Builds SFC from source
+3. Removes the system `coreutils` package
+4. Installs SFC binaries to `/usr/bin`
+
+### Manual Build
+
+```bash
+scripts/build.sh
+```
+
+This builds SFC and creates necessary symlinks in `target/release/`.
 
 ---
 
-## screenshots of shell and fasterfetch
-<img width="847" height="376" alt="image" src="https://github.com/user-attachments/assets/096ae275-bd31-4a5c-adfc-dfbf2779be3f" />
-<img width="561" height="85" alt="image" src="https://github.com/user-attachments/assets/71577a18-5973-406c-9699-f65e25e992f7" />
-<img width="612" height="80" alt="image" src="https://github.com/user-attachments/assets/3e99af95-d281-425f-94ec-1eaaef5057ea" />
-<img width="732" height="282" alt="image" src="https://github.com/user-attachments/assets/94be5d2d-45ba-4826-927a-785d08859238" />
+## Uninstall
+
+To restore the original GNU coreutils:
+
+### Arch Linux
+```bash
+sudo pacman -S coreutils
+```
+
+### Fedora
+```bash
+sudo dnf install coreutils
+```
+
+### NixOS
+Remove `sfc` from `configuration.nix` and run `sudo nixos-rebuild switch`.
+
+---
