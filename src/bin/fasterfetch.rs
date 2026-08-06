@@ -81,27 +81,56 @@ fn get_uptime() -> String {
         .unwrap_or_else(|| "Unknown".to_string())
 }
 
-fn get_parent_pid() -> Option<u32> {
-    let stat = fs::read_to_string("/proc/self/stat").ok()?;
-    let r_paren = stat.rfind(')')?;
-    let after_paren = &stat[r_paren + 1..];
-    let mut fields = after_paren.split_whitespace();
-    let _state = fields.next()?;
-    let ppid_str = fields.next()?;
-    ppid_str.parse::<u32>().ok()
-}
-
 fn get_shell() -> String {
-    if let Some(ppid) = get_parent_pid() {
-        let comm_path = format!("/proc/{}/comm", ppid);
-        if let Ok(comm) = fs::read_to_string(comm_path) {
-            return comm.trim().to_string();
+    if let Ok(shell_path) = env::var("SHELL") {
+        if let Ok(resolved) = fs::canonicalize(&shell_path) {
+            if let Some(name) = resolved.file_name() {
+                return name.to_string_lossy().to_string();
+            }
+        }
+        if let Some(name) = Path::new(&shell_path).file_name() {
+            return name.to_string_lossy().to_string();
         }
     }
-    env::var("SHELL")
-        .ok()
-        .and_then(|s| s.split('/').last().map(|s| s.to_string()))
-        .unwrap_or_else(|| "sfshell".to_string())
+    let mut pid = std::process::id();
+    loop {
+        let stat_path = format!("/proc/{}/stat", pid);
+        let stat = match fs::read_to_string(&stat_path) {
+            Ok(s) => s,
+            Err(_) => break,
+        };
+        let r_paren = match stat.rfind(')') {
+            Some(p) => p,
+            None => break,
+        };
+        let fields: Vec<&str> = stat[r_paren + 1..].split_whitespace().collect();
+        if fields.len() < 3 {
+            break;
+        }
+        let ppid: u32 = match fields[1].parse() {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        if ppid <= 1 {
+            break;
+        }
+        let comm_path = format!("/proc/{}/comm", pid);
+        if let Ok(comm) = fs::read_to_string(&comm_path) {
+            let comm = comm.trim().to_string();
+            if is_known_shell(&comm) {
+                return comm;
+            }
+        }
+        pid = ppid;
+    }
+    "sfsh".to_string()
+}
+
+fn is_known_shell(name: &str) -> bool {
+    matches!(
+        name,
+        "sfsh" | "bash" | "zsh" | "fish" | "sh" | "dash" | "ksh" | "tcsh" | "csh" | "ash"
+    )
 }
 
 fn get_cpu() -> String {
@@ -232,16 +261,267 @@ fn get_packages() -> String {
 }
 
 fn count_rpm() -> Option<u32> {
-    let bdb_path = "/var/lib/rpm/Packages";
-    if let Ok(data) = fs::read(bdb_path) {
-        if data.len() >= 32 {
-            let nrecs = u32::from_le_bytes([data[28], data[29], data[30], data[31]]);
-            if nrecs > 0 && nrecs < 200_000 {
-                return Some(nrecs);
+    let bdb_paths = ["/var/lib/rpm/Packages", "/usr/lib/sysimage/rpm/Packages"];
+    for path in &bdb_paths {
+        if let Ok(data) = fs::read(path) {
+            if data.len() >= 32 {
+                let nrecs = u32::from_le_bytes([data[28], data[29], data[30], data[31]]);
+                if nrecs > 0 && nrecs < 200_000 {
+                    return Some(nrecs);
+                }
+            }
+        }
+    }
+
+    let sqlite_paths = [
+        "/var/lib/rpm/rpmdb.sqlite",
+        "/usr/lib/sysimage/rpm/rpmdb.sqlite",
+        "/var/lib/rpm/rpmdb.sqlite-wal",
+    ];
+    for path in &sqlite_paths {
+        if path.ends_with("-wal") {
+            continue;
+        }
+        if let Some(count) = count_rpm_sqlite(path) {
+            if count > 0 {
+                return Some(count);
             }
         }
     }
     None
+}
+
+fn count_rpm_sqlite(path: &str) -> Option<u32> {
+    let data = fs::read(path).ok()?;
+    if data.len() < 100 {
+        return None;
+    }
+    if &data[0..15] != b"SQLite format 3" {
+        return None;
+    }
+    let page_size = {
+        let raw = u16::from_be_bytes([data[16], data[17]]);
+        if raw == 1 {
+            65536usize
+        } else {
+            raw as usize
+        }
+    };
+    let rootpage = sqlite_find_table_root(&data, page_size, "Packages")?;
+    Some(sqlite_count_btree(&data, page_size, rootpage as usize))
+}
+
+fn sqlite_read_varint(data: &[u8], offset: usize) -> (u64, usize) {
+    let mut result: u64 = 0;
+    for i in 0..9 {
+        if offset + i >= data.len() {
+            return (result, i);
+        }
+        let byte = data[offset + i] as u64;
+        if i == 8 {
+            result = (result << 8) | byte;
+            return (result, 9);
+        }
+        result = (result << 7) | (byte & 0x7F);
+        if byte & 0x80 == 0 {
+            return (result, i + 1);
+        }
+    }
+    (result, 9)
+}
+
+fn sqlite_page_offset(page_num: usize, page_size: usize) -> usize {
+    (page_num - 1) * page_size
+}
+
+fn sqlite_btree_hdr(page_num: usize) -> usize {
+    if page_num == 1 {
+        100
+    } else {
+        0
+    }
+}
+
+fn sqlite_find_table_root(data: &[u8], page_size: usize, table_name: &str) -> Option<u32> {
+    sqlite_scan_master(data, page_size, 1, table_name)
+}
+
+fn sqlite_scan_master(
+    data: &[u8],
+    page_size: usize,
+    page_num: usize,
+    table_name: &str,
+) -> Option<u32> {
+    let page_off = sqlite_page_offset(page_num, page_size);
+    let hdr_off = page_off + sqlite_btree_hdr(page_num);
+    if hdr_off >= data.len() {
+        return None;
+    }
+    let page_type = data[hdr_off];
+    let num_cells = u16::from_be_bytes([data[hdr_off + 3], data[hdr_off + 4]]) as usize;
+
+    match page_type {
+        0x0d => {
+            let ptr_start = hdr_off + 8;
+            for i in 0..num_cells {
+                let ptr_off = ptr_start + i * 2;
+                if ptr_off + 2 > data.len() {
+                    break;
+                }
+                let cell_off =
+                    page_off + u16::from_be_bytes([data[ptr_off], data[ptr_off + 1]]) as usize;
+                if let Some(root) = sqlite_parse_master_cell(data, cell_off, table_name) {
+                    return Some(root);
+                }
+            }
+        }
+        0x05 => {
+            let ptr_start = hdr_off + 12;
+            for i in 0..num_cells {
+                let ptr_off = ptr_start + i * 2;
+                if ptr_off + 2 > data.len() {
+                    break;
+                }
+                let cell_off =
+                    page_off + u16::from_be_bytes([data[ptr_off], data[ptr_off + 1]]) as usize;
+                if cell_off + 4 > data.len() {
+                    continue;
+                }
+                let child = u32::from_be_bytes([
+                    data[cell_off],
+                    data[cell_off + 1],
+                    data[cell_off + 2],
+                    data[cell_off + 3],
+                ]) as usize;
+                if let Some(r) = sqlite_scan_master(data, page_size, child, table_name) {
+                    return Some(r);
+                }
+            }
+            let rp_off = hdr_off + 8;
+            if rp_off + 4 <= data.len() {
+                let right = u32::from_be_bytes([
+                    data[rp_off],
+                    data[rp_off + 1],
+                    data[rp_off + 2],
+                    data[rp_off + 3],
+                ]) as usize;
+                if let Some(r) = sqlite_scan_master(data, page_size, right, table_name) {
+                    return Some(r);
+                }
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn sqlite_parse_master_cell(data: &[u8], cell_off: usize, table_name: &str) -> Option<u32> {
+    let mut off = cell_off;
+    if off >= data.len() {
+        return None;
+    }
+    let (_payload_len, n) = sqlite_read_varint(data, off);
+    off += n;
+    let (_rowid, n) = sqlite_read_varint(data, off);
+    off += n;
+    if off >= data.len() {
+        return None;
+    }
+    let (header_len, n) = sqlite_read_varint(data, off);
+    let header_end = off + header_len as usize;
+    let mut serial_off = off + n;
+    let mut serial_types = Vec::new();
+    while serial_off < header_end && serial_off < data.len() {
+        let (st, n) = sqlite_read_varint(data, serial_off);
+        serial_types.push(st);
+        serial_off += n;
+    }
+    let mut data_off = header_end;
+    let mut values: Vec<Vec<u8>> = Vec::new();
+    for st in &serial_types {
+        let size = match st {
+            0 | 8 | 9 => 0usize,
+            1 => 1,
+            2 => 2,
+            3 => 3,
+            4 => 4,
+            5 => 6,
+            6 => 8,
+            7 => 8,
+            _ if *st >= 12 && st % 2 == 0 => ((*st - 12) / 2) as usize,
+            _ if *st >= 13 && st % 2 == 1 => ((*st - 13) / 2) as usize,
+            _ => 0,
+        };
+        let val = if size > 0 && data_off + size <= data.len() {
+            data[data_off..data_off + size].to_vec()
+        } else {
+            Vec::new()
+        };
+        values.push(val);
+        data_off += size;
+    }
+    if values.len() >= 4 {
+        let name = String::from_utf8_lossy(&values[1]);
+        if name == table_name {
+            if values[3].len() >= 4 {
+                let rp =
+                    u32::from_be_bytes([values[3][0], values[3][1], values[3][2], values[3][3]]);
+                return Some(rp);
+            }
+        }
+    }
+    None
+}
+
+fn sqlite_count_btree(data: &[u8], page_size: usize, page_num: usize) -> u32 {
+    if page_num == 0 {
+        return 0;
+    }
+    let page_off = sqlite_page_offset(page_num, page_size);
+    let hdr_off = page_off + sqlite_btree_hdr(page_num);
+    if hdr_off >= data.len() {
+        return 0;
+    }
+    let page_type = data[hdr_off];
+    let num_cells = u16::from_be_bytes([data[hdr_off + 3], data[hdr_off + 4]]) as u32;
+
+    match page_type {
+        0x0d => num_cells,
+        0x05 => {
+            let mut count = 0;
+            let ptr_start = hdr_off + 12;
+            for i in 0..num_cells as usize {
+                let ptr_off = ptr_start + i * 2;
+                if ptr_off + 2 > data.len() {
+                    break;
+                }
+                let cell_off =
+                    page_off + u16::from_be_bytes([data[ptr_off], data[ptr_off + 1]]) as usize;
+                if cell_off + 4 > data.len() {
+                    continue;
+                }
+                let child = u32::from_be_bytes([
+                    data[cell_off],
+                    data[cell_off + 1],
+                    data[cell_off + 2],
+                    data[cell_off + 3],
+                ]) as usize;
+                count += sqlite_count_btree(data, page_size, child);
+            }
+            let rp_off = hdr_off + 8;
+            if rp_off + 4 <= data.len() {
+                let right = u32::from_be_bytes([
+                    data[rp_off],
+                    data[rp_off + 1],
+                    data[rp_off + 2],
+                    data[rp_off + 3],
+                ]) as usize;
+                count += sqlite_count_btree(data, page_size, right);
+            }
+            count
+        }
+        _ => 0,
+    }
 }
 
 fn get_gpu() -> String {
