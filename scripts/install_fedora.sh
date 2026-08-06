@@ -7,7 +7,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 sudo dnf install -y gcc cargo rust
 
 cd "$PROJECT_ROOT"
-cargo build --release --locked
+cargo build --release
 cd target/release
 
 sudo dnf remove -y coreutils

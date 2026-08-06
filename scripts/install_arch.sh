@@ -7,7 +7,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 sudo pacman -S --needed --noconfirm base-devel rust cargo
 
 cd "$PROJECT_ROOT"
-cargo build --release --locked
+cargo build --release
 cd target/release
 
 sudo pacman -R --noconfirm coreutils
