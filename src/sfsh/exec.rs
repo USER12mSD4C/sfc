@@ -40,23 +40,30 @@ fn save_fds(redirs: &[Redirect]) -> Vec<SavedFd> {
     let mut saved = Vec::new();
     let mut targets = HashSet::new();
     for redir in redirs {
-        let target = match redir {
-            Redirect::In(fd, _) => fd.unwrap_or(0) as RawFd,
-            Redirect::Out(fd, _) => fd.unwrap_or(1) as RawFd,
-            Redirect::Append(fd, _) => fd.unwrap_or(1) as RawFd,
-            Redirect::Here(fd, _, _, _, _) => fd.unwrap_or(0) as RawFd,
-            Redirect::DupIn(fd, _) => fd.unwrap_or(0) as RawFd,
-            Redirect::DupOut(fd, _) => fd.unwrap_or(1) as RawFd,
-            Redirect::ReadWrite(fd, _) => fd.unwrap_or(0) as RawFd,
-        };
-        if targets.insert(target) {
-            unsafe {
-                let duped = libc::dup(target);
-                if duped >= 0 {
-                    saved.push(SavedFd {
-                        target,
-                        saved: duped,
-                    });
+        let mut to_save: Vec<RawFd> = Vec::new();
+        match redir {
+            Redirect::OutErr(_) => {
+                to_save.push(1);
+                to_save.push(2);
+            }
+            Redirect::In(fd, _) => to_save.push(fd.unwrap_or(0) as RawFd),
+            Redirect::Out(fd, _) => to_save.push(fd.unwrap_or(1) as RawFd),
+            Redirect::Append(fd, _) => to_save.push(fd.unwrap_or(1) as RawFd),
+            Redirect::Here(fd, _, _, _, _) => to_save.push(fd.unwrap_or(0) as RawFd),
+            Redirect::DupIn(fd, _) => to_save.push(fd.unwrap_or(0) as RawFd),
+            Redirect::DupOut(fd, _) => to_save.push(fd.unwrap_or(1) as RawFd),
+            Redirect::ReadWrite(fd, _) => to_save.push(fd.unwrap_or(0) as RawFd),
+        }
+        for target in to_save {
+            if targets.insert(target) {
+                unsafe {
+                    let duped = libc::dup(target);
+                    if duped >= 0 {
+                        saved.push(SavedFd {
+                            target,
+                            saved: duped,
+                        });
+                    }
                 }
             }
         }
@@ -533,7 +540,6 @@ fn execute_simple(
                 }
                 cmd.exec()
             };
-
             if let Some(errno) = err.raw_os_error() {
                 if errno == libc::ENOEXEC {
                     if let Ok(content) = std::fs::read_to_string(&first) {
@@ -544,8 +550,14 @@ fn execute_simple(
                         shell_exit(code);
                     }
                 }
+                if errno == libc::EACCES {
+                    eprintln!(
+                        "sfsh: DEBUG EACCES: попытка выполнить '{}' (аргументы: {:?})",
+                        first,
+                        &args[1..]
+                    );
+                }
             }
-
             eprintln!("sfsh: {}: {}", first, err);
             shell_exit(if err.raw_os_error() == Some(libc::ENOENT) {
                 127
@@ -911,17 +923,14 @@ fn apply_redirects(
 ) -> bool {
     let _ = std::io::Write::flush(&mut std::io::stdout());
     let _ = std::io::Write::flush(&mut std::io::stderr());
-
     for redir in redirs {
         match redir {
             Redirect::In(fd, word) => {
                 let path = expand_word(word, vars, aliases, funcs).join(" ");
-
                 match File::open(&path) {
                     Ok(f) => {
                         let raw = f.into_raw_fd();
                         let target = fd.unwrap_or(0) as RawFd;
-
                         if !dup_fd(raw, target) {
                             return false;
                         }
@@ -934,12 +943,10 @@ fn apply_redirects(
             }
             Redirect::Out(fd, word) => {
                 let path = expand_word(word, vars, aliases, funcs).join(" ");
-
                 match File::create(&path) {
                     Ok(f) => {
                         let raw = f.into_raw_fd();
                         let target = fd.unwrap_or(1) as RawFd;
-
                         if !dup_fd(raw, target) {
                             return false;
                         }
@@ -952,12 +959,10 @@ fn apply_redirects(
             }
             Redirect::Append(fd, word) => {
                 let path = expand_word(word, vars, aliases, funcs).join(" ");
-
                 match OpenOptions::new().create(true).append(true).open(&path) {
                     Ok(f) => {
                         let raw = f.into_raw_fd();
                         let target = fd.unwrap_or(1) as RawFd;
-
                         if !dup_fd(raw, target) {
                             return false;
                         }
@@ -973,9 +978,7 @@ fn apply_redirects(
                     Some(b) => b.clone(),
                     None => continue,
                 };
-
                 let mut expanded = String::new();
-
                 for line in body.lines() {
                     if *quoted {
                         expanded.push_str(line);
@@ -984,21 +987,16 @@ fn apply_redirects(
                         let line_expanded = expand_assignment(&word, vars, aliases, funcs);
                         expanded.push_str(&line_expanded);
                     }
-
                     expanded.push('\n');
                 }
-
                 let name = CString::new("sfsh_heredoc").unwrap();
                 let raw = unsafe { libc::memfd_create(name.as_ptr(), 0) };
-
                 if raw < 0 {
                     eprintln!("sfsh: memfd_create: {}", std::io::Error::last_os_error());
                     return false;
                 }
-
                 let bytes = expanded.as_bytes();
                 let mut written = 0;
-
                 while written < bytes.len() {
                     let n = unsafe {
                         libc::write(
@@ -1007,7 +1005,6 @@ fn apply_redirects(
                             bytes.len() - written,
                         )
                     };
-
                     if n < 0 {
                         unsafe {
                             libc::close(raw);
@@ -1015,16 +1012,12 @@ fn apply_redirects(
                         eprintln!("sfsh: heredoc write: {}", std::io::Error::last_os_error());
                         return false;
                     }
-
                     written += n as usize;
                 }
-
                 unsafe {
                     libc::lseek(raw, 0, libc::SEEK_SET);
                 }
-
                 let target = fd.unwrap_or(0) as RawFd;
-
                 if !dup_fd(raw, target) {
                     return false;
                 }
@@ -1032,7 +1025,6 @@ fn apply_redirects(
             Redirect::DupIn(fd, word) => {
                 let s = expand_word(word, vars, aliases, funcs).join(" ");
                 let target = fd.unwrap_or(0) as RawFd;
-
                 if s == "-" {
                     unsafe {
                         libc::close(target);
@@ -1040,7 +1032,6 @@ fn apply_redirects(
                 } else if let Ok(n) = s.parse::<RawFd>() {
                     if n != target {
                         let res = unsafe { libc::dup2(n, target) };
-
                         if res < 0 {
                             eprintln!("sfsh: dup2: {}", std::io::Error::last_os_error());
                             return false;
@@ -1051,7 +1042,6 @@ fn apply_redirects(
             Redirect::DupOut(fd, word) => {
                 let s = expand_word(word, vars, aliases, funcs).join(" ");
                 let target = fd.unwrap_or(1) as RawFd;
-
                 if s == "-" {
                     unsafe {
                         libc::close(target);
@@ -1059,7 +1049,6 @@ fn apply_redirects(
                 } else if let Ok(n) = s.parse::<RawFd>() {
                     if n != target {
                         let res = unsafe { libc::dup2(n, target) };
-
                         if res < 0 {
                             eprintln!("sfsh: dup2: {}", std::io::Error::last_os_error());
                             return false;
@@ -1069,7 +1058,6 @@ fn apply_redirects(
             }
             Redirect::ReadWrite(fd, word) => {
                 let path = expand_word(word, vars, aliases, funcs).join(" ");
-
                 match OpenOptions::new()
                     .read(true)
                     .write(true)
@@ -1079,8 +1067,28 @@ fn apply_redirects(
                     Ok(f) => {
                         let raw = f.into_raw_fd();
                         let target = fd.unwrap_or(0) as RawFd;
-
                         if !dup_fd(raw, target) {
+                            return false;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("sfsh: {}: {}", path, e);
+                        return false;
+                    }
+                }
+            }
+            Redirect::OutErr(word) => {
+                let path = expand_word(word, vars, aliases, funcs).join(" ");
+                match File::create(&path) {
+                    Ok(f) => {
+                        let raw = f.into_raw_fd();
+                        let r1 = unsafe { libc::dup2(raw, 1) };
+                        let r2 = unsafe { libc::dup2(raw, 2) };
+                        unsafe {
+                            libc::close(raw);
+                        }
+                        if r1 < 0 || r2 < 0 {
+                            eprintln!("sfsh: dup2: {}", std::io::Error::last_os_error());
                             return false;
                         }
                     }
@@ -1092,7 +1100,6 @@ fn apply_redirects(
             }
         }
     }
-
     true
 }
 

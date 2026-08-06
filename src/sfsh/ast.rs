@@ -36,6 +36,7 @@ pub enum Redirect {
     DupOut(Option<u32>, Word),
     DupIn(Option<u32>, Word),
     ReadWrite(Option<u32>, Word),
+    OutErr(Word),
 }
 
 #[derive(Debug, Clone)]

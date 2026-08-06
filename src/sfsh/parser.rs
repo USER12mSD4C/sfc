@@ -14,6 +14,7 @@ impl Parser {
     fn peek(&self) -> &Token {
         self.toks.get(self.pos).unwrap_or(&Token::Eof)
     }
+
     fn next(&mut self) -> Token {
         let t = self.toks.get(self.pos).cloned().unwrap_or(Token::Eof);
         self.pos += 1;
@@ -27,9 +28,11 @@ impl Parser {
             _ => false,
         }
     }
+
     fn at_word(&self) -> bool {
         matches!(self.peek(), Token::Word(_))
     }
+
     fn consume(&mut self, s: &str) -> bool {
         if self.at(s) {
             self.next();
@@ -45,19 +48,15 @@ impl Parser {
 
     fn parse_list(&mut self) -> Command {
         let mut cmds = Vec::new();
-
         loop {
             while self.consume_newline() {}
-
             if self.at_list_terminator() {
                 break;
             }
-
             let p = self.parse_pipeline();
             if let Command::Empty = p {
                 break;
             }
-
             let op = if self.consume("&&") {
                 Some("&&".to_string())
             } else if self.consume("||") {
@@ -71,15 +70,12 @@ impl Parser {
             } else {
                 None
             };
-
             let done = op.is_none();
             cmds.push((p, op));
-
             if done {
                 break;
             }
         }
-
         if cmds.is_empty() {
             Command::Empty
         } else {
@@ -134,7 +130,6 @@ impl Parser {
             self.expect("}");
             return Command::Brace(Box::new(c));
         }
-
         if self.at_word() {
             if let Token::Word(w) = self.peek().clone() {
                 let s = word_str(&w);
@@ -144,6 +139,7 @@ impl Parser {
                     "while" => return self.parse_while(),
                     "until" => return self.parse_until(),
                     "case" => return self.parse_case(),
+                    "function" => return self.parse_function_keyword(),
                     _ => {}
                 }
                 if self
@@ -285,6 +281,17 @@ impl Parser {
         Command::Function(name, Box::new(body))
     }
 
+    fn parse_function_keyword(&mut self) -> Command {
+        self.next();
+        let name = self.expect_word();
+        if self.consume("(") {
+            self.expect(")");
+        }
+        while self.consume_newline() {}
+        let body = self.parse_command();
+        Command::Function(name, Box::new(body))
+    }
+
     fn consume_newline(&mut self) -> bool {
         if matches!(self.peek(), Token::Newline) {
             self.next();
@@ -298,20 +305,17 @@ impl Parser {
         let mut assignments = Vec::new();
         let mut words = Vec::new();
         let mut redirs = Vec::new();
-
         loop {
             match self.peek() {
                 Token::Word(w) => {
                     let w = w.clone();
                     self.next();
-
                     if words.is_empty() {
                         if let Some(assign) = assignment_word(&w) {
                             assignments.push(assign);
                             continue;
                         }
                     }
-
                     words.push(w);
                 }
                 Token::IoNumber(n) => {
@@ -331,7 +335,6 @@ impl Parser {
                 Token::HereBody(body) => {
                     let body = body.clone();
                     self.next();
-
                     for r in redirs.iter_mut().rev() {
                         if let Redirect::Here(_, _, _, _, ref mut b) = r {
                             if b.is_none() {
@@ -344,7 +347,6 @@ impl Parser {
                 _ => break,
             }
         }
-
         if assignments.is_empty() && words.is_empty() && redirs.is_empty() {
             Command::Empty
         } else {
@@ -390,6 +392,10 @@ impl Parser {
                 self.next();
                 Some(Redirect::ReadWrite(fd, self.expect_word_obj()))
             }
+            Token::Op(ref s) if s == "&>" => {
+                self.next();
+                Some(Redirect::OutErr(self.expect_word_obj()))
+            }
             _ => None,
         }
     }
@@ -420,7 +426,10 @@ impl Parser {
 }
 
 fn is_redir_op(s: &str) -> bool {
-    matches!(s, "<" | ">" | ">>" | "<<" | "<<-" | "<&" | ">&" | "<>")
+    matches!(
+        s,
+        "<" | ">" | ">>" | "<<" | "<<-" | "<&" | ">&" | "<>" | "&>"
+    )
 }
 
 fn word_str(w: &Word) -> String {
@@ -487,34 +496,26 @@ fn assignment_word(w: &Word) -> Option<(String, Word)> {
         Some(WordPart::Lit(s)) => s,
         _ => return None,
     };
-
     let eq = first.find('=')?;
     let name = &first[..eq];
-
     if !is_valid_var_name(name) {
         return None;
     }
-
     let rest = &first[eq + 1..];
     let mut parts = Vec::new();
-
     if !rest.is_empty() {
         parts.push(WordPart::Lit(rest.to_string()));
     }
-
     parts.extend(w.0.iter().skip(1).cloned());
-
     Some((name.to_string(), Word(parts)))
 }
 
 fn is_valid_var_name(s: &str) -> bool {
     let mut chars = s.chars();
-
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
         _ => return false,
     }
-
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 

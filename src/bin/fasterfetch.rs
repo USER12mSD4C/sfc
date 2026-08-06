@@ -169,26 +169,96 @@ fn get_mem_swap() -> (String, String) {
 }
 
 fn get_packages() -> String {
-    let mut system_pkgs = 0;
-    if let Ok(entries) = fs::read_dir("/run/current-system/sw/bin") {
-        system_pkgs = entries.count();
+    let mut counts = Vec::new();
+
+    if let Ok(entries) = fs::read_dir("/var/lib/pacman/local") {
+        let count = entries.filter(|e| e.is_ok()).count().saturating_sub(1);
+        if count > 0 {
+            counts.push(format!("{} (pacman)", count));
+        }
     }
-    let mut user_pkgs = 0;
+
+    if let Ok(content) = fs::read_to_string("/var/lib/dpkg/status") {
+        let count = content.matches("Status: install ok installed").count();
+        if count > 0 {
+            counts.push(format!("{} (dpkg)", count));
+        }
+    }
+
+    if let Ok(output) = std::process::Command::new("rpm").arg("-qa").output() {
+        if output.status.success() {
+            let count = String::from_utf8_lossy(&output.stdout).lines().count();
+            if count > 0 {
+                counts.push(format!("{} (rpm)", count));
+            }
+        }
+    }
+
+    if let Ok(content) = fs::read_to_string("/lib/apk/db/installed") {
+        let count = content.matches("\nPackage: ").count();
+        if count > 0 {
+            counts.push(format!("{} (apk)", count));
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir("/var/db/xbps") {
+        let count = entries.filter(|e| e.is_ok()).count();
+        if count > 0 {
+            counts.push(format!("{} (xbps)", count));
+        }
+    }
+
+    let mut nix_system = 0;
+    if let Ok(entries) = fs::read_dir("/run/current-system/sw/bin") {
+        nix_system = entries.count();
+    }
+    let mut nix_user = 0;
     if let Ok(home) = env::var("HOME") {
         let user_path = format!("{}/.nix-profile/bin", home);
         if let Ok(entries) = fs::read_dir(user_path) {
-            user_pkgs = entries.count();
+            nix_user = entries.count();
         }
     }
-    if user_pkgs > 0 {
-        format!("{} (nix-system), {} (nix-user)", system_pkgs, user_pkgs)
+    if nix_system > 0 || nix_user > 0 {
+        if nix_user > 0 {
+            counts.push(format!(
+                "{} (nix-system), {} (nix-user)",
+                nix_system, nix_user
+            ));
+        } else {
+            counts.push(format!("{} (nix-system)", nix_system));
+        }
+    }
+
+    if let Ok(output) = std::process::Command::new("flatpak").arg("list").output() {
+        if output.status.success() {
+            let count = String::from_utf8_lossy(&output.stdout).lines().count();
+            if count > 0 {
+                counts.push(format!("{} (flatpak)", count));
+            }
+        }
+    }
+
+    if let Ok(output) = std::process::Command::new("snap").arg("list").output() {
+        if output.status.success() {
+            let count = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .count()
+                .saturating_sub(1);
+            if count > 0 {
+                counts.push(format!("{} (snap)", count));
+            }
+        }
+    }
+
+    if counts.is_empty() {
+        "Unknown".to_string()
     } else {
-        format!("{} (nix-system)", system_pkgs)
+        counts.join(", ")
     }
 }
 
 fn get_gpu() -> String {
-    // 1. Попытка для NVIDIA с проприетарными драйверами
     if let Ok(entries) = fs::read_dir("/proc/driver/nvidia/gpus") {
         for entry in entries.flatten() {
             if let Ok(info) = fs::read_to_string(entry.path().join("information")) {
@@ -201,13 +271,11 @@ fn get_gpu() -> String {
         }
     }
 
-    // 2. Универсальный обход шины PCI для детекции любых карт (AMD, Intel, NVIDIA в драйвере Nouveau)
     if let Ok(entries) = fs::read_dir("/sys/bus/pci/devices") {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Ok(class_str) = fs::read_to_string(path.join("class")) {
                 let class_trimmed = class_str.trim().trim_start_matches("0x");
-                // Класс PCI 03xxxx означает дисплейный адаптер (видеокарту)
                 if class_trimmed.starts_with("03") {
                     if let (Ok(v_raw), Ok(d_raw)) = (
                         fs::read_to_string(path.join("vendor")),
@@ -216,7 +284,6 @@ fn get_gpu() -> String {
                         let vendor = v_raw.trim().trim_start_matches("0x").to_uppercase();
                         let device = d_raw.trim().trim_start_matches("0x").to_uppercase();
 
-                        // Сопоставляем вендоров
                         let vendor_name = match vendor.as_str() {
                             "1002" => "AMD Radeon",
                             "10DE" => "NVIDIA",
@@ -224,10 +291,9 @@ fn get_gpu() -> String {
                             _ => "Unknown GPU",
                         };
 
-                        // Таблица популярных моделей
                         if vendor == "1002" {
                             match device.as_str() {
-                                "67DF" => return "AMD Radeon RX 570 Series".to_string(), // Ваша RX 570!
+                                "67DF" => return "AMD Radeon RX 570 Series".to_string(),
                                 "731F" => return "AMD Radeon RX 5700 Series".to_string(),
                                 "743F" => return "AMD Radeon RX 6400/6500 XT".to_string(),
                                 "73BF" => return "AMD Radeon RX 6800/6900 Series".to_string(),

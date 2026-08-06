@@ -91,12 +91,16 @@ pub fn lex(input: &str) -> Vec<Token> {
 }
 
 fn is_redir_op(s: &str) -> bool {
-    matches!(s, "<" | ">" | ">>" | "<<-" | "<<" | "<&" | ">&" | "<>")
+    matches!(
+        s,
+        "<" | ">" | ">>" | "<<" | "<<-" | "<&" | ">&" | "<>" | "&>"
+    )
 }
 
 fn read_op(cs: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
     let ops = [
-        "&&", "||", ";;", "<<-", ">>", "<<", "<&", ">&", "<>", "&", "|", ";", "(", ")", "<", ">",
+        "&&", "||", ";;", "<<-", ">>", "<<", "<&", ">&", "<>", "&>", "&", "|", ";", "(", ")", "<",
+        ">",
     ];
     let rest: String = cs.clone().take(4).collect();
     for op in ops {
