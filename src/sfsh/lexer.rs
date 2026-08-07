@@ -13,27 +13,22 @@ pub enum Token {
 pub fn lex(input: &str) -> Vec<Token> {
     let mut t = Vec::new();
     let mut cs = input.chars().peekable();
-
     let mut pending_heredocs: Vec<(bool, String)> = Vec::new();
     let mut expect_heredoc: Option<bool> = None;
 
     while let Some(&c) = cs.peek() {
         if c == '\n' {
             cs.next();
-
             if pending_heredocs.is_empty() {
                 t.push(Token::Newline);
             } else {
                 let pendings = std::mem::take(&mut pending_heredocs);
-
                 for (strip, delim) in pendings {
                     let body = read_heredoc_body(&mut cs, &delim, strip);
                     t.push(Token::HereBody(body));
                 }
-
                 t.push(Token::Newline);
             }
-
             continue;
         }
 
@@ -58,13 +53,11 @@ pub fn lex(input: &str) -> Vec<Token> {
             } else if op == "<<-" {
                 expect_heredoc = Some(true);
             }
-
             t.push(Token::Op(op));
             continue;
         }
 
         let w = read_word(&mut cs);
-
         if !w.is_empty() {
             if let Some(strip) = expect_heredoc.take() {
                 let (delim, _quoted) = parse_heredoc_delim(&w);
@@ -73,7 +66,6 @@ pub fn lex(input: &str) -> Vec<Token> {
 
             if let Ok(n) = w.parse::<u32>() {
                 let mut clone = cs.clone();
-
                 if let Some(op) = read_op(&mut clone) {
                     if is_redir_op(&op) {
                         t.push(Token::IoNumber(n));
@@ -81,26 +73,20 @@ pub fn lex(input: &str) -> Vec<Token> {
                     }
                 }
             }
-
             t.push(Token::Word(parse_word(&w)));
         }
     }
-
     t.push(Token::Eof);
     t
 }
 
 fn is_redir_op(s: &str) -> bool {
-    matches!(
-        s,
-        "<" | ">" | ">>" | "<<" | "<<-" | "<&" | ">&" | "<>" | "&>"
-    )
+    matches!(s, "<" | ">" | ">>" | "<<-" | "<<" | "<&" | ">&" | "<>" | "&>")
 }
 
 fn read_op(cs: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
     let ops = [
-        "&&", "||", ";;", "<<-", ">>", "<<", "<&", ">&", "<>", "&>", "&", "|", ";", "(", ")", "<",
-        ">",
+        "&&", "||", ";;", "<<-", ">>", "<<", "<&", ">&", "<>", "&>", "|&", "&", "|", ";", "(", ")", "<", ">",
     ];
     let rest: String = cs.clone().take(4).collect();
     for op in ops {
@@ -116,12 +102,10 @@ fn read_op(cs: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
 
 fn read_word(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
     let mut s = String::new();
-
     while let Some(&c) = cs.peek() {
         if c.is_whitespace() || c == '\n' {
             break;
         }
-
         if !s.is_empty() {
             let mut clone = cs.clone();
             if read_op(&mut clone).is_some() {
@@ -161,7 +145,6 @@ fn read_word(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
         } else if c == '$' {
             cs.next();
             s.push('$');
-
             if let Some(&'(') = cs.peek() {
                 s.push_str(&read_dollar_paren(cs));
             } else if let Some(&'{') = cs.peek() {
@@ -172,39 +155,31 @@ fn read_word(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
             cs.next();
         }
     }
-
     s
 }
 
 fn read_raw_squote(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
     cs.next();
-
     let mut s = String::from("'");
-
     while let Some(&c) = cs.peek() {
         if c == '\'' {
             cs.next();
             s.push('\'');
             break;
         }
-
         s.push(c);
         cs.next();
     }
-
     s
 }
 
 fn read_raw_dquote(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
     cs.next();
-
     let mut s = String::from("\"");
-
     while let Some(&c) = cs.peek() {
         if c == '\\' {
             cs.next();
             s.push('\\');
-
             if let Some(&x) = cs.peek() {
                 cs.next();
                 s.push(x);
@@ -218,41 +193,32 @@ fn read_raw_dquote(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
             cs.next();
         }
     }
-
     s
 }
 
 fn read_dollar_paren(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
     cs.next();
-
     let mut out = String::from("(");
-
     if let Some(&'(') = cs.peek() {
         cs.next();
         out.push('(');
-
         let mut depth = 2;
-
         while let Some(&c) = cs.peek() {
             cs.next();
             out.push(c);
-
             if c == '(' {
                 depth += 1;
             } else if c == ')' {
                 depth -= 1;
-
                 if depth == 0 {
                     break;
                 }
             }
         }
-
         return out;
     }
 
     let mut depth = 1;
-
     while let Some(&c) = cs.peek() {
         match c {
             '\'' => {
@@ -264,7 +230,6 @@ fn read_dollar_paren(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
             '\\' => {
                 cs.next();
                 out.push('\\');
-
                 if let Some(&x) = cs.peek() {
                     cs.next();
                     out.push(x);
@@ -273,7 +238,6 @@ fn read_dollar_paren(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
             '$' => {
                 cs.next();
                 out.push('$');
-
                 if let Some(&'(') = cs.peek() {
                     out.push_str(&read_dollar_paren(cs));
                 } else if let Some(&'{') = cs.peek() {
@@ -289,7 +253,6 @@ fn read_dollar_paren(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
                 cs.next();
                 out.push(')');
                 depth -= 1;
-
                 if depth == 0 {
                     break;
                 }
@@ -300,16 +263,13 @@ fn read_dollar_paren(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
             }
         }
     }
-
     out
 }
 
 fn read_dollar_brace(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
     cs.next();
-
     let mut out = String::from("{");
     let mut depth = 1;
-
     while let Some(&c) = cs.peek() {
         match c {
             '\'' => {
@@ -321,7 +281,6 @@ fn read_dollar_brace(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
             '\\' => {
                 cs.next();
                 out.push('\\');
-
                 if let Some(&x) = cs.peek() {
                     cs.next();
                     out.push(x);
@@ -330,7 +289,6 @@ fn read_dollar_brace(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
             '$' => {
                 cs.next();
                 out.push('$');
-
                 if let Some(&'(') = cs.peek() {
                     out.push_str(&read_dollar_paren(cs));
                 } else if let Some(&'{') = cs.peek() {
@@ -346,7 +304,6 @@ fn read_dollar_brace(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
                 cs.next();
                 out.push('}');
                 depth -= 1;
-
                 if depth == 0 {
                     break;
                 }
@@ -357,7 +314,6 @@ fn read_dollar_brace(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
             }
         }
     }
-
     out
 }
 
@@ -479,6 +435,7 @@ fn read_dollar(cs: &mut std::iter::Peekable<std::str::Chars>) -> WordPart {
             }
             return WordPart::Arith(s);
         }
+
         let mut s = String::new();
         let mut d = 0;
         while let Some(&c) = cs.peek() {
@@ -497,6 +454,7 @@ fn read_dollar(cs: &mut std::iter::Peekable<std::str::Chars>) -> WordPart {
         }
         return WordPart::Cmd(s);
     }
+
     let mut name = String::new();
     if let Some(&'{') = cs.peek() {
         cs.next();
@@ -512,6 +470,7 @@ fn read_dollar(cs: &mut std::iter::Peekable<std::str::Chars>) -> WordPart {
             }
             return WordPart::Param(name, Some(ParamOp::Len));
         }
+
         while let Some(&c) = cs.peek() {
             if c == '}' {
                 cs.next();
@@ -523,6 +482,7 @@ fn read_dollar(cs: &mut std::iter::Peekable<std::str::Chars>) -> WordPart {
         let (name, op) = parse_param_expansion(&name);
         return WordPart::Param(name, op);
     }
+
     if let Some(&c) = cs.peek() {
         if "?$!#-@*".contains(c) || c.is_ascii_digit() {
             cs.next();
@@ -530,6 +490,7 @@ fn read_dollar(cs: &mut std::iter::Peekable<std::str::Chars>) -> WordPart {
             return WordPart::Param(name, None);
         }
     }
+
     while let Some(&c) = cs.peek() {
         if !c.is_alphanumeric() && c != '_' {
             break;
@@ -566,19 +527,15 @@ fn parse_param_expansion(inner: &str) -> (String, Option<ParamOp>) {
 
     let chars: Vec<char> = inner.chars().collect();
     let mut idx = 0;
-
     while idx < chars.len() {
         let c = chars[idx];
-
         if idx > 0 && matches!(c, ':' | '-' | '=' | '?' | '+' | '#' | '%') {
             break;
         }
-
         idx += 1;
     }
 
     let name: String = chars[..idx].iter().collect();
-
     if idx == chars.len() {
         return (name, None);
     }
@@ -590,7 +547,6 @@ fn parse_param_expansion(inner: &str) -> (String, Option<ParamOp>) {
         ':' => {
             if let Some(op2) = rest.chars().next() {
                 let tail: String = rest.chars().skip(1).collect();
-
                 match op2 {
                     '-' => Some(ParamOp::Def(tail, true)),
                     '=' => Some(ParamOp::Assign(tail, true)),
@@ -630,7 +586,6 @@ fn parse_param_expansion(inner: &str) -> (String, Option<ParamOp>) {
         }
         _ => None,
     };
-
     (name, op)
 }
 
@@ -638,11 +593,9 @@ fn parse_heredoc_delim(raw: &str) -> (String, bool) {
     if raw.len() >= 2 && raw.starts_with('\'') && raw.ends_with('\'') {
         return (raw[1..raw.len() - 1].to_string(), true);
     }
-
     if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
         return (raw[1..raw.len() - 1].to_string(), true);
     }
-
     (raw.to_string(), false)
 }
 
@@ -652,19 +605,15 @@ fn read_heredoc_body(
     strip: bool,
 ) -> String {
     let mut body = String::new();
-
     loop {
         let mut line = String::new();
         let mut ended = false;
-
         while let Some(&c) = cs.peek() {
             cs.next();
-
             if c == '\n' {
                 ended = true;
                 break;
             }
-
             line.push(c);
         }
 
@@ -685,6 +634,5 @@ fn read_heredoc_body(
             break;
         }
     }
-
     body
 }

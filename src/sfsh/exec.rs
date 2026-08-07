@@ -112,12 +112,10 @@ pub fn execute_script_capture(
     funcs: &HashMap<String, AstCommand>,
 ) -> Result<String, String> {
     let shell_pgid = getpgrp().as_raw();
-
     let mut fds = [0i32; 2];
     unsafe {
         libc::pipe(fds.as_mut_ptr());
     }
-
     match unsafe { fork() } {
         Ok(ForkResult::Child) => {
             unsafe {
@@ -126,11 +124,11 @@ pub fn execute_script_capture(
                 libc::close(fds[1]);
                 libc::setpgid(0, 0);
             }
-
-            let mut child_aliases = aliases.clone();
-            let mut child_funcs = funcs.clone();
+            
+            let mut child_aliases = unsafe { std::ptr::read(aliases as *const _) };
+            let mut child_funcs = unsafe { std::ptr::read(funcs as *const _) };
             let mut child_jobs = JobTable::new();
-
+            
             let code = execute_script(
                 input,
                 vars,
@@ -139,7 +137,6 @@ pub fn execute_script_capture(
                 &mut child_jobs,
                 shell_pgid,
             );
-
             let _ = std::io::Write::flush(&mut std::io::stdout());
             shell_exit(code);
         }
@@ -147,13 +144,10 @@ pub fn execute_script_capture(
             unsafe {
                 libc::close(fds[1]);
             }
-
             let mut output = String::new();
             let mut file = unsafe { File::from_raw_fd(fds[0]) };
             file.read_to_string(&mut output).ok();
-
             let _ = waitpid(child, None);
-
             Ok(output)
         }
         Err(e) => Err(e.to_string()),
@@ -198,7 +192,6 @@ pub fn execute_command(
                     other => return other,
                 };
             vars.set_opt('e', old_e);
-
             vars.last_status = st;
             if st == 0 {
                 execute_command(then_, vars, aliases, funcs, jobs, shell_pgid, false, None)
@@ -210,18 +203,15 @@ pub fn execute_command(
         }
         AstCommand::For(var, words, body) => {
             let mut last = 0;
-
             let mut expanded: Vec<String> = Vec::new();
             for w in words {
                 expanded.extend(expand_word(w, vars, aliases, funcs));
             }
-
             let items: Vec<String> = if expanded.is_empty() {
                 vars.positional.clone()
             } else {
                 expanded
             };
-
             for val in items {
                 vars.set(var, &val, false);
                 match execute_command(body, vars, aliases, funcs, jobs, shell_pgid, false, None) {
@@ -232,7 +222,6 @@ pub fn execute_command(
                     ExecResult::Value(v) => last = v,
                 }
             }
-
             ExecResult::Value(last)
         }
         AstCommand::While(cond, body) => {
@@ -248,7 +237,6 @@ pub fn execute_command(
                     other => return other,
                 };
                 vars.set_opt('e', old_e);
-
                 vars.last_status = st;
                 if st != 0 {
                     break;
@@ -276,7 +264,6 @@ pub fn execute_command(
                     other => return other,
                 };
                 vars.set_opt('e', old_e);
-
                 vars.last_status = st;
                 if st == 0 {
                     break;
@@ -293,11 +280,9 @@ pub fn execute_command(
         }
         AstCommand::Case(word, arms) => {
             let val = expand_assignment(word, vars, aliases, funcs);
-
             for (pats, cmd) in arms {
                 for pat in pats {
                     let p = expand_assignment(pat, vars, aliases, funcs);
-
                     if match_glob(&p, &val) {
                         return execute_command(
                             cmd, vars, aliases, funcs, jobs, shell_pgid, false, None,
@@ -305,7 +290,6 @@ pub fn execute_command(
                     }
                 }
             }
-
             ExecResult::Value(0)
         }
         AstCommand::Function(name, body) => {
@@ -320,11 +304,9 @@ pub fn execute_command(
                     ExecResult::Value(v) | ExecResult::Return(v) | ExecResult::Exit(v) => v,
                     _ => 0,
                 };
-
                 if let Some(trap_cmd) = crate::sfsh::builtin::get_trap_command("EXIT") {
                     let _ = execute_script(&trap_cmd, vars, aliases, funcs, jobs, shell_pgid);
                 }
-
                 shell_exit(code);
             }
             Ok(ForkResult::Parent { child }) => {
@@ -397,17 +379,14 @@ fn execute_simple(
 ) -> ExecResult {
     if words.is_empty() {
         let saved = save_fds(redirs);
-
         if !apply_redirects(redirs, vars, aliases, funcs) {
             restore_fds(&saved);
             return ExecResult::Value(1);
         }
-
         for (name, word) in assignments {
             let val = expand_assignment(word, vars, aliases, funcs);
             vars.set(name, &val, false);
         }
-
         restore_fds(&saved);
         return ExecResult::Value(0);
     }
@@ -511,7 +490,6 @@ fn execute_simple(
                 None => vars.unset(&name),
             }
         }
-
         restore_fds(&saved);
         return result;
     }
@@ -540,6 +518,7 @@ fn execute_simple(
                 }
                 cmd.exec()
             };
+
             if let Some(errno) = err.raw_os_error() {
                 if errno == libc::ENOEXEC {
                     if let Ok(content) = std::fs::read_to_string(&first) {
@@ -550,14 +529,8 @@ fn execute_simple(
                         shell_exit(code);
                     }
                 }
-                if errno == libc::EACCES {
-                    eprintln!(
-                        "sfsh: DEBUG EACCES: попытка выполнить '{}' (аргументы: {:?})",
-                        first,
-                        &args[1..]
-                    );
-                }
             }
+
             eprintln!("sfsh: {}: {}", first, err);
             shell_exit(if err.raw_os_error() == Some(libc::ENOENT) {
                 127
@@ -605,7 +578,6 @@ fn execute_simple(
                     libc::tcsetpgrp(0, shell_pgid);
                 }
             }
-
             ExecResult::Value(extract_status(status))
         }
         Err(e) => {
@@ -680,11 +652,9 @@ fn execute_pipeline(
                             let val = expand_assignment(word, vars, aliases, funcs);
                             vars.set(name, &val, false);
                         }
-
                         if !apply_redirects(redirs, vars, aliases, funcs) {
                             shell_exit(1);
                         }
-
                         shell_exit(0);
                     }
 
@@ -709,11 +679,9 @@ fn execute_pipeline(
                         if !apply_redirects(redirs, vars, aliases, funcs) {
                             shell_exit(1);
                         }
-
                         for (name, val) in &assignment_values {
                             vars.set(name, val, false);
                         }
-
                         let result = if funcs.contains_key(&first) {
                             let func = funcs.get(&first).cloned().unwrap();
                             vars.push_local();
@@ -727,12 +695,10 @@ fn execute_pipeline(
                             run_builtin(&first, &expanded, vars, aliases, funcs, jobs, shell_pgid)
                                 .unwrap_or(ExecResult::Value(0))
                         };
-
                         let code = match result {
                             ExecResult::Value(v) | ExecResult::Return(v) | ExecResult::Exit(v) => v,
                             _ => 0,
                         };
-
                         let _ = std::io::Write::flush(&mut std::io::stdout());
                         shell_exit(code);
                     }
@@ -812,7 +778,6 @@ fn execute_pipeline(
     }
 
     let pgid = pgid.unwrap();
-
     if background {
         let id = jobs.add(pgid, "pipeline".to_string());
         println!("[{}] {}", id, pgid.as_raw());
@@ -861,35 +826,27 @@ fn execute_list(
 ) -> ExecResult {
     let mut last = 0;
     let mut run_current = true;
-
     for (cmd, op) in list {
         let bg = op.as_deref() == Some("&");
-
         if run_current {
             let result = execute_command(cmd, vars, aliases, funcs, jobs, shell_pgid, bg, None);
-
             last = match result {
                 ExecResult::Value(v) | ExecResult::Return(v) => v,
                 ExecResult::Exit(v) => return ExecResult::Exit(v),
                 ExecResult::Break | ExecResult::Continue => return result,
             };
-
             vars.last_status = last;
-
             let conditional = matches!(op.as_deref(), Some("&&") | Some("||"));
-
             if vars.opts.get(&'e').copied().unwrap_or(false) && last != 0 && !bg && !conditional {
                 return ExecResult::Exit(last);
             }
         }
-
         run_current = match op.as_deref() {
             Some("&&") => last == 0,
             Some("||") => last != 0,
             _ => true,
         };
     }
-
     ExecResult::Value(last)
 }
 
@@ -897,9 +854,7 @@ fn dup_fd(raw: RawFd, target: RawFd) -> bool {
     if raw == target {
         return true;
     }
-
     let res = unsafe { libc::dup2(raw, target) };
-
     if res < 0 {
         unsafe {
             libc::close(raw);
@@ -907,11 +862,9 @@ fn dup_fd(raw: RawFd, target: RawFd) -> bool {
         eprintln!("sfsh: dup2: {}", std::io::Error::last_os_error());
         return false;
     }
-
     unsafe {
         libc::close(raw);
     }
-
     true
 }
 
@@ -1084,9 +1037,7 @@ fn apply_redirects(
                         let raw = f.into_raw_fd();
                         let r1 = unsafe { libc::dup2(raw, 1) };
                         let r2 = unsafe { libc::dup2(raw, 2) };
-                        unsafe {
-                            libc::close(raw);
-                        }
+                        unsafe { libc::close(raw); }
                         if r1 < 0 || r2 < 0 {
                             eprintln!("sfsh: dup2: {}", std::io::Error::last_os_error());
                             return false;

@@ -224,6 +224,9 @@ fn main() -> ExitCode {
         if last.is_dir() {
             dest = last.clone();
             sources = &opts.sources[..opts.sources.len() - 1];
+        } else if opts.sources.len() == 2 {
+            dest = last.clone();
+            sources = &opts.sources[..1];
         } else {
             eprintln!("cp: target '{}' is not a directory", last.display());
             return ExitCode::from(1);
@@ -360,7 +363,7 @@ fn copy_file(src: &Path, dest: &Path, meta: &fs::Metadata, opts: &Options) -> io
     let mut copied = false;
 
     if opts.reflink != When::Never {
-        let res = unsafe { libc::ioctl(dest_fd, FICLONE, src_fd) };
+        let res = unsafe { libc::ioctl(dest_fd, FICLONE as _, src_fd) };
         if res == 0 {
             copied = true;
         } else if opts.reflink == When::Always {

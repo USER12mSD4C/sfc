@@ -426,10 +426,7 @@ impl Parser {
 }
 
 fn is_redir_op(s: &str) -> bool {
-    matches!(
-        s,
-        "<" | ">" | ">>" | "<<" | "<<-" | "<&" | ">&" | "<>" | "&>"
-    )
+    matches!(s, "<" | ">" | ">>" | "<<" | "<<-" | "<&" | ">&" | "<>" | "&>")
 }
 
 fn word_str(w: &Word) -> String {
