@@ -4,11 +4,27 @@ use crate::sfsh::lexer::Token;
 pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
+    error: Option<String>,
 }
 
 impl Parser {
     pub fn new(toks: Vec<Token>) -> Self {
-        Self { toks, pos: 0 }
+        Self {
+            toks,
+            pos: 0,
+            error: None,
+        }
+    }
+
+    pub fn error(&self) -> Option<String> {
+        self.error.clone()
+    }
+
+    fn syntax_error(&mut self, msg: String) {
+        if self.error.is_none() {
+            self.error = Some(msg);
+        }
+        self.pos = self.toks.len();
     }
 
     fn peek(&self) -> &Token {
@@ -24,7 +40,9 @@ impl Parser {
     fn at(&self, s: &str) -> bool {
         match self.peek() {
             Token::Op(ref x) => x == s,
-            Token::Word(ref w) => w.0.len() == 1 && matches!(&w.0[0], WordPart::Lit(x) if x == s),
+            Token::Word(ref w) => {
+                w.0.len() == 1 && matches!(&w.0[0], WordPart::Lit(x) if x == s)
+            }
             _ => false,
         }
     }
@@ -33,8 +51,21 @@ impl Parser {
         matches!(self.peek(), Token::Word(_))
     }
 
+    fn at_word_str(&self, s: &str) -> bool {
+        matches!(self.peek(), Token::Word(w) if word_str(w) == s)
+    }
+
     fn consume(&mut self, s: &str) -> bool {
         if self.at(s) {
+            self.next();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn consume_word_str(&mut self, s: &str) -> bool {
+        if self.at_word_str(s) {
             self.next();
             true
         } else {
@@ -97,24 +128,41 @@ impl Parser {
     }
 
     fn parse_pipeline(&mut self) -> Command {
+        let negated = self.consume_word_str("!");
+
         let mut cmds = Vec::new();
         let c = self.parse_command();
+
         if let Command::Empty = c {
+            if negated {
+                self.syntax_error("expected command after '!'".to_string());
+            }
             return Command::Empty;
         }
+
         cmds.push(c);
+
         while self.consume("|") {
             while self.consume_newline() {}
+
             let c = self.parse_command();
             if let Command::Empty = c {
                 break;
             }
+
             cmds.push(c);
         }
-        if cmds.len() == 1 {
+
+        let pipeline = if cmds.len() == 1 {
             cmds.into_iter().next().unwrap()
         } else {
             Command::Pipeline(cmds)
+        };
+
+        if negated {
+            Command::Not(Box::new(pipeline))
+        } else {
+            pipeline
         }
     }
 
@@ -124,15 +172,18 @@ impl Parser {
             self.expect(")");
             return Command::Subshell(Box::new(c));
         }
+
         if self.at("{") {
             self.next();
             let c = self.parse_list();
             self.expect("}");
             return Command::Brace(Box::new(c));
         }
+
         if self.at_word() {
             if let Token::Word(w) = self.peek().clone() {
                 let s = word_str(&w);
+
                 match s.as_str() {
                     "if" => return self.parse_if(),
                     "for" => return self.parse_for(),
@@ -140,8 +191,10 @@ impl Parser {
                     "until" => return self.parse_until(),
                     "case" => return self.parse_case(),
                     "function" => return self.parse_function_keyword(),
+                    "[[" => return self.parse_double_bracket(),
                     _ => {}
                 }
+
                 if self
                     .toks
                     .get(self.pos + 1)
@@ -155,12 +208,14 @@ impl Parser {
                 {
                     return self.parse_function(s);
                 }
+
                 if self
                     .toks
                     .get(self.pos + 1)
                     .map(|t| {
                         matches!(t, Token::Word(ref w2) if {
-                            w2.0.len() == 1 && matches!(&w2.0[0], WordPart::Lit(x) if x == "{")
+                            w2.0.len() == 1
+                                && matches!(&w2.0[0], WordPart::Lit(x) if x == "{")
                         })
                     })
                     .unwrap_or(false)
@@ -169,6 +224,7 @@ impl Parser {
                 }
             }
         }
+
         self.parse_simple()
     }
 
@@ -402,26 +458,172 @@ impl Parser {
 
     fn expect(&mut self, s: &str) {
         if !self.consume(s) {
-            panic!(
-                "sfsh: syntax error: expected '{}' but found {:?}",
-                s,
-                self.peek()
-            );
+            self.syntax_error(format!("expected '{}' but found {:?}", s, self.peek()));
         }
     }
 
     fn expect_word(&mut self) -> String {
         match self.next() {
             Token::Word(w) => word_str(&w),
-            _ => panic!("sfsh: syntax error: expected word"),
+            _ => {
+                self.syntax_error("expected word".to_string());
+                String::new()
+            }
         }
     }
 
     fn expect_word_obj(&mut self) -> Word {
         match self.next() {
             Token::Word(w) => w,
-            _ => panic!("sfsh: syntax error: expected word"),
+            _ => {
+                self.syntax_error("expected word".to_string());
+                Word(Vec::new())
+            }
         }
+    }
+
+    fn parse_double_bracket(&mut self) -> Command {
+        self.next();
+
+        while self.consume_newline() {}
+
+        let expr = self.parse_cond_or();
+
+        while self.consume_newline() {}
+
+        if !self.consume_word_str("]]") {
+            self.syntax_error("expected ']]'".to_string());
+        }
+
+        Command::Cond(Box::new(expr))
+    }
+
+    fn parse_cond_or(&mut self) -> CondExpr {
+        let mut left = self.parse_cond_and();
+
+        loop {
+            while self.consume_newline() {}
+
+            if !self.consume("||") {
+                break;
+            }
+
+            while self.consume_newline() {}
+
+            let right = self.parse_cond_and();
+            left = CondExpr::Or(Box::new(left), Box::new(right));
+        }
+
+        left
+    }
+
+    fn parse_cond_and(&mut self) -> CondExpr {
+        let mut left = self.parse_cond_primary();
+
+        loop {
+            while self.consume_newline() {}
+
+            if !self.consume("&&") {
+                break;
+            }
+
+            while self.consume_newline() {}
+
+            let right = self.parse_cond_primary();
+            left = CondExpr::And(Box::new(left), Box::new(right));
+        }
+
+        left
+    }
+
+    fn parse_cond_primary(&mut self) -> CondExpr {
+        if self.consume_word_str("!") {
+            while self.consume_newline() {}
+
+            let expr = self.parse_cond_primary();
+            return CondExpr::Not(Box::new(expr));
+        }
+
+        if self.consume("(") {
+            while self.consume_newline() {}
+
+            let expr = self.parse_cond_or();
+
+            while self.consume_newline() {}
+
+            if !self.consume(")") {
+                self.syntax_error("expected ')' inside [[ condition".to_string());
+            }
+
+            return CondExpr::Paren(Box::new(expr));
+        }
+
+        self.parse_cond_test()
+    }
+
+    fn parse_cond_test(&mut self) -> CondExpr {
+        let lhs = self.expect_word_obj();
+
+        while self.consume_newline() {}
+
+        if self.at_word_str("]]") || self.at("&&") || self.at("||") || self.at(")") {
+            return CondExpr::Unary("-n".to_string(), lhs);
+        }
+
+        let lhs_str = word_str(&lhs);
+
+        if self.is_cond_unary_op(&lhs_str) {
+            let rhs = self.expect_word_obj();
+            return CondExpr::Unary(lhs_str, rhs);
+        }
+
+        let op = if self.consume("<") {
+            "<".to_string()
+        } else if self.consume(">") {
+            ">".to_string()
+        } else if self.consume_word_str("==") {
+            "==".to_string()
+        } else if self.consume_word_str("=") {
+            "=".to_string()
+        } else if self.consume_word_str("!=") {
+            "!=".to_string()
+        } else if self.consume_word_str("=~") {
+            "=~".to_string()
+        } else {
+            self.syntax_error("expected operator inside [[ condition".to_string());
+            return CondExpr::Unary("-n".to_string(), lhs);
+        };
+
+        let rhs = self.expect_word_obj();
+
+        CondExpr::Binary(op, lhs, rhs)
+    }
+
+    fn is_cond_unary_op(&self, s: &str) -> bool {
+        matches!(
+            s,
+            "-z" | "-n"
+                | "-e"
+                | "-f"
+                | "-d"
+                | "-h"
+                | "-L"
+                | "-s"
+                | "-r"
+                | "-w"
+                | "-x"
+                | "-b"
+                | "-c"
+                | "-p"
+                | "-S"
+                | "-t"
+                | "-u"
+                | "-g"
+                | "-k"
+                | "-G"
+                | "-N"
+                | "-O"
+        )
     }
 }
 

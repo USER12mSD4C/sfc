@@ -40,6 +40,16 @@ pub enum Redirect {
 }
 
 #[derive(Debug, Clone)]
+pub enum CondExpr {
+    Or(Box<CondExpr>, Box<CondExpr>),
+    And(Box<CondExpr>, Box<CondExpr>),
+    Not(Box<CondExpr>),
+    Paren(Box<CondExpr>),
+    Unary(String, Word),
+    Binary(String, Word, Word),
+}
+
+#[derive(Debug, Clone)]
 pub enum Command {
     Simple(Vec<(String, Word)>, Vec<Word>, Vec<Redirect>),
     Pipeline(Vec<Command>),
@@ -52,5 +62,7 @@ pub enum Command {
     Function(String, Box<Command>),
     Subshell(Box<Command>),
     Brace(Box<Command>),
+    Not(Box<Command>),
+    Cond(Box<CondExpr>),
     Empty,
 }

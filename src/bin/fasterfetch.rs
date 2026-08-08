@@ -2,38 +2,24 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-fn base64_encode(input: &str) -> String {
+fn base64_encode_bytes(input: &[u8]) -> String {
     const CHARSET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = input.as_bytes();
-    let mut result = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity((input.len() + 2) / 3 * 4);
     let mut i = 0;
-    while i < bytes.len() {
-        let b0 = bytes[i] as usize;
-        let b1 = if i + 1 < bytes.len() {
-            bytes[i + 1] as usize
-        } else {
-            0
-        };
-        let b2 = if i + 2 < bytes.len() {
-            bytes[i + 2] as usize
-        } else {
-            0
-        };
+    while i < input.len() {
+        let b0 = input[i] as usize;
+        let b1 = if i + 1 < input.len() { input[i + 1] as usize } else { 0 };
+        let b2 = if i + 2 < input.len() { input[i + 2] as usize } else { 0 };
 
-        let c0 = b0 >> 2;
-        let c1 = ((b0 & 3) << 4) | (b1 >> 4);
-        let c2 = ((b1 & 15) << 2) | (b2 >> 6);
-        let c3 = b2 & 63;
-
-        result.push(CHARSET[c0] as char);
-        result.push(CHARSET[c1] as char);
-        if i + 1 < bytes.len() {
-            result.push(CHARSET[c2] as char);
+        result.push(CHARSET[b0 >> 2] as char);
+        result.push(CHARSET[((b0 & 3) << 4) | (b1 >> 4)] as char);
+        if i + 1 < input.len() {
+            result.push(CHARSET[((b1 & 15) << 2) | (b2 >> 6)] as char);
         } else {
             result.push('=');
         }
-        if i + 2 < bytes.len() {
-            result.push(CHARSET[c3] as char);
+        if i + 2 < input.len() {
+            result.push(CHARSET[b2 & 63] as char);
         } else {
             result.push('=');
         }
@@ -82,18 +68,31 @@ fn get_uptime() -> String {
 }
 
 fn get_shell() -> String {
-    if let Ok(shell_path) = env::var("SHELL") {
-        if let Ok(resolved) = fs::canonicalize(&shell_path) {
-            if let Some(name) = resolved.file_name() {
-                return name.to_string_lossy().to_string();
+    let mut pid = std::process::id();
+
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{}/stat", pid)) {
+        if let Some(r_paren) = stat.rfind(')') {
+            let fields: Vec<&str> = stat[r_paren + 1..].split_whitespace().collect();
+            if fields.len() >= 2 {
+                if let Ok(ppid) = fields[1].parse::<u32>() {
+                    pid = ppid;
+                }
             }
         }
-        if let Some(name) = Path::new(&shell_path).file_name() {
-            return name.to_string_lossy().to_string();
-        }
     }
-    let mut pid = std::process::id();
+
     loop {
+        if pid <= 1 {
+            break;
+        }
+        let comm_path = format!("/proc/{}/comm", pid);
+        if let Ok(comm) = fs::read_to_string(&comm_path) {
+            let comm = comm.trim().to_string();
+            if is_known_shell(&comm) {
+                return comm;
+            }
+        }
+
         let stat_path = format!("/proc/{}/stat", pid);
         let stat = match fs::read_to_string(&stat_path) {
             Ok(s) => s,
@@ -104,26 +103,22 @@ fn get_shell() -> String {
             None => break,
         };
         let fields: Vec<&str> = stat[r_paren + 1..].split_whitespace().collect();
-        if fields.len() < 3 {
+        if fields.len() < 2 {
             break;
         }
         let ppid: u32 = match fields[1].parse() {
             Ok(p) => p,
             Err(_) => break,
         };
-        if ppid <= 1 {
-            break;
-        }
-        let comm_path = format!("/proc/{}/comm", pid);
-        if let Ok(comm) = fs::read_to_string(&comm_path) {
-            let comm = comm.trim().to_string();
-            if is_known_shell(&comm) {
-                return comm;
-            }
-        }
         pid = ppid;
     }
-    "sfsh".to_string()
+
+    if let Ok(shell_path) = env::var("SHELL") {
+        if let Some(name) = Path::new(&shell_path).file_name() {
+            return name.to_string_lossy().to_string();
+        }
+    }
+    "unknown".to_string()
 }
 
 fn is_known_shell(name: &str) -> bool {
@@ -261,6 +256,18 @@ fn get_packages() -> String {
 }
 
 fn count_rpm() -> Option<u32> {
+    if let Ok(out) = std::process::Command::new("rpm")
+        .args(["-qa", "--qf", "x\n"])
+        .output()
+    {
+        if out.status.success() {
+            let count = out.stdout.iter().filter(|&&b| b == b'x').count();
+            if count > 0 {
+                return Some(count as u32);
+            }
+        }
+    }
+
     let bdb_paths = ["/var/lib/rpm/Packages", "/usr/lib/sysimage/rpm/Packages"];
     for path in &bdb_paths {
         if let Ok(data) = fs::read(path) {
@@ -272,280 +279,22 @@ fn count_rpm() -> Option<u32> {
             }
         }
     }
-
-    let sqlite_paths = [
-        "/var/lib/rpm/rpmdb.sqlite",
-        "/usr/lib/sysimage/rpm/rpmdb.sqlite",
-        "/var/lib/rpm/rpmdb.sqlite-wal",
-    ];
-    for path in &sqlite_paths {
-        if path.ends_with("-wal") {
-            continue;
-        }
-        if let Some(count) = count_rpm_sqlite(path) {
-            if count > 0 {
-                return Some(count);
-            }
-        }
-    }
     None
-}
-
-fn count_rpm_sqlite(path: &str) -> Option<u32> {
-    let data = fs::read(path).ok()?;
-    if data.len() < 100 {
-        return None;
-    }
-    if &data[0..15] != b"SQLite format 3" {
-        return None;
-    }
-    let page_size = {
-        let raw = u16::from_be_bytes([data[16], data[17]]);
-        if raw == 1 {
-            65536usize
-        } else {
-            raw as usize
-        }
-    };
-    let rootpage = sqlite_find_table_root(&data, page_size, "Packages")?;
-    Some(sqlite_count_btree(&data, page_size, rootpage as usize))
-}
-
-fn sqlite_read_varint(data: &[u8], offset: usize) -> (u64, usize) {
-    let mut result: u64 = 0;
-    for i in 0..9 {
-        if offset + i >= data.len() {
-            return (result, i);
-        }
-        let byte = data[offset + i] as u64;
-        if i == 8 {
-            result = (result << 8) | byte;
-            return (result, 9);
-        }
-        result = (result << 7) | (byte & 0x7F);
-        if byte & 0x80 == 0 {
-            return (result, i + 1);
-        }
-    }
-    (result, 9)
-}
-
-fn sqlite_page_offset(page_num: usize, page_size: usize) -> usize {
-    (page_num - 1) * page_size
-}
-
-fn sqlite_btree_hdr(page_num: usize) -> usize {
-    if page_num == 1 {
-        100
-    } else {
-        0
-    }
-}
-
-fn sqlite_find_table_root(data: &[u8], page_size: usize, table_name: &str) -> Option<u32> {
-    sqlite_scan_master(data, page_size, 1, table_name)
-}
-
-fn sqlite_scan_master(
-    data: &[u8],
-    page_size: usize,
-    page_num: usize,
-    table_name: &str,
-) -> Option<u32> {
-    let page_off = sqlite_page_offset(page_num, page_size);
-    let hdr_off = page_off + sqlite_btree_hdr(page_num);
-    if hdr_off >= data.len() {
-        return None;
-    }
-    let page_type = data[hdr_off];
-    let num_cells = u16::from_be_bytes([data[hdr_off + 3], data[hdr_off + 4]]) as usize;
-
-    match page_type {
-        0x0d => {
-            let ptr_start = hdr_off + 8;
-            for i in 0..num_cells {
-                let ptr_off = ptr_start + i * 2;
-                if ptr_off + 2 > data.len() {
-                    break;
-                }
-                let cell_off =
-                    page_off + u16::from_be_bytes([data[ptr_off], data[ptr_off + 1]]) as usize;
-                if let Some(root) = sqlite_parse_master_cell(data, cell_off, table_name) {
-                    return Some(root);
-                }
-            }
-        }
-        0x05 => {
-            let ptr_start = hdr_off + 12;
-            for i in 0..num_cells {
-                let ptr_off = ptr_start + i * 2;
-                if ptr_off + 2 > data.len() {
-                    break;
-                }
-                let cell_off =
-                    page_off + u16::from_be_bytes([data[ptr_off], data[ptr_off + 1]]) as usize;
-                if cell_off + 4 > data.len() {
-                    continue;
-                }
-                let child = u32::from_be_bytes([
-                    data[cell_off],
-                    data[cell_off + 1],
-                    data[cell_off + 2],
-                    data[cell_off + 3],
-                ]) as usize;
-                if let Some(r) = sqlite_scan_master(data, page_size, child, table_name) {
-                    return Some(r);
-                }
-            }
-            let rp_off = hdr_off + 8;
-            if rp_off + 4 <= data.len() {
-                let right = u32::from_be_bytes([
-                    data[rp_off],
-                    data[rp_off + 1],
-                    data[rp_off + 2],
-                    data[rp_off + 3],
-                ]) as usize;
-                if let Some(r) = sqlite_scan_master(data, page_size, right, table_name) {
-                    return Some(r);
-                }
-            }
-        }
-        _ => {}
-    }
-    None
-}
-
-fn sqlite_parse_master_cell(data: &[u8], cell_off: usize, table_name: &str) -> Option<u32> {
-    let mut off = cell_off;
-    if off >= data.len() {
-        return None;
-    }
-    let (_payload_len, n) = sqlite_read_varint(data, off);
-    off += n;
-    let (_rowid, n) = sqlite_read_varint(data, off);
-    off += n;
-    if off >= data.len() {
-        return None;
-    }
-    let (header_len, n) = sqlite_read_varint(data, off);
-    let header_end = off + header_len as usize;
-    let mut serial_off = off + n;
-    let mut serial_types = Vec::new();
-    while serial_off < header_end && serial_off < data.len() {
-        let (st, n) = sqlite_read_varint(data, serial_off);
-        serial_types.push(st);
-        serial_off += n;
-    }
-    let mut data_off = header_end;
-    let mut values: Vec<Vec<u8>> = Vec::new();
-    for st in &serial_types {
-        let size = match st {
-            0 | 8 | 9 => 0usize,
-            1 => 1,
-            2 => 2,
-            3 => 3,
-            4 => 4,
-            5 => 6,
-            6 => 8,
-            7 => 8,
-            _ if *st >= 12 && st % 2 == 0 => ((*st - 12) / 2) as usize,
-            _ if *st >= 13 && st % 2 == 1 => ((*st - 13) / 2) as usize,
-            _ => 0,
-        };
-        let val = if size > 0 && data_off + size <= data.len() {
-            data[data_off..data_off + size].to_vec()
-        } else {
-            Vec::new()
-        };
-        values.push(val);
-        data_off += size;
-    }
-    if values.len() >= 4 {
-        let name = String::from_utf8_lossy(&values[1]);
-        if name == table_name {
-            if values[3].len() >= 4 {
-                let rp =
-                    u32::from_be_bytes([values[3][0], values[3][1], values[3][2], values[3][3]]);
-                return Some(rp);
-            }
-        }
-    }
-    None
-}
-
-fn sqlite_count_btree(data: &[u8], page_size: usize, page_num: usize) -> u32 {
-    if page_num == 0 {
-        return 0;
-    }
-    let page_off = sqlite_page_offset(page_num, page_size);
-    let hdr_off = page_off + sqlite_btree_hdr(page_num);
-    if hdr_off >= data.len() {
-        return 0;
-    }
-    let page_type = data[hdr_off];
-    let num_cells = u16::from_be_bytes([data[hdr_off + 3], data[hdr_off + 4]]) as u32;
-
-    match page_type {
-        0x0d => num_cells,
-        0x05 => {
-            let mut count = 0;
-            let ptr_start = hdr_off + 12;
-            for i in 0..num_cells as usize {
-                let ptr_off = ptr_start + i * 2;
-                if ptr_off + 2 > data.len() {
-                    break;
-                }
-                let cell_off =
-                    page_off + u16::from_be_bytes([data[ptr_off], data[ptr_off + 1]]) as usize;
-                if cell_off + 4 > data.len() {
-                    continue;
-                }
-                let child = u32::from_be_bytes([
-                    data[cell_off],
-                    data[cell_off + 1],
-                    data[cell_off + 2],
-                    data[cell_off + 3],
-                ]) as usize;
-                count += sqlite_count_btree(data, page_size, child);
-            }
-            let rp_off = hdr_off + 8;
-            if rp_off + 4 <= data.len() {
-                let right = u32::from_be_bytes([
-                    data[rp_off],
-                    data[rp_off + 1],
-                    data[rp_off + 2],
-                    data[rp_off + 3],
-                ]) as usize;
-                count += sqlite_count_btree(data, page_size, right);
-            }
-            count
-        }
-        _ => 0,
-    }
 }
 
 fn get_gpu() -> String {
-    if let Ok(entries) = fs::read_dir("/proc/driver/nvidia/gpus") {
-        for entry in entries.flatten() {
-            if let Ok(info) = fs::read_to_string(entry.path().join("information")) {
-                for line in info.lines() {
-                    if line.starts_with("Model:") {
-                        return line["Model:".len()..].trim().to_string();
-                    }
-                }
-            }
-        }
-    }
-
     if let Ok(entries) = fs::read_dir("/sys/bus/pci/devices") {
         for entry in entries.flatten() {
             let path = entry.path();
-            if let Ok(class_str) = fs::read_to_string(path.join("class")) {
+            let class_path = path.join("class");
+            if let Ok(class_str) = fs::read_to_string(&class_path) {
                 let class_trimmed = class_str.trim().trim_start_matches("0x");
                 if class_trimmed.starts_with("03") {
+                    let vendor_path = path.join("vendor");
+                    let device_path = path.join("device");
                     if let (Ok(v_raw), Ok(d_raw)) = (
-                        fs::read_to_string(path.join("vendor")),
-                        fs::read_to_string(path.join("device")),
+                        fs::read_to_string(&vendor_path),
+                        fs::read_to_string(&device_path),
                     ) {
                         let vendor = v_raw.trim().trim_start_matches("0x").to_uppercase();
                         let device = d_raw.trim().trim_start_matches("0x").to_uppercase();
@@ -577,6 +326,18 @@ fn get_gpu() -> String {
                         } else {
                             return format!("{} (0x{})", vendor_name, device);
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir("/proc/driver/nvidia/gpus") {
+        for entry in entries.flatten() {
+            if let Ok(info) = fs::read_to_string(entry.path().join("information")) {
+                for line in info.lines() {
+                    if line.starts_with("Model:") {
+                        return line["Model:".len()..].trim().to_string();
                     }
                 }
             }
@@ -642,18 +403,30 @@ fn main() {
     }
 
     let col_jump = if let Some(ref path) = image_path {
-        let b64_path = base64_encode(path);
+        if let Ok(data) = fs::read(path) {
+            let b64 = base64_encode_bytes(&data);
+            let chunks: Vec<&str> = b64.as_bytes()
+                .chunks(4096)
+                .map(|c| std::str::from_utf8(c).unwrap())
+                .collect();
+            let num_chunks = chunks.len();
 
-        for _ in 0..12 {
-            println!();
+            for _ in 0..12 { println!(); }
+            print!("\x1b[12A");
+
+            for (i, chunk) in chunks.iter().enumerate() {
+                let m = if i == num_chunks - 1 { 0 } else { 1 };
+                if i == 0 {
+                    print!("\x1b_Ga=T,f=100,t=d,r=12,c=28,m={};{}\x1b\\", m, chunk);
+                } else {
+                    print!("\x1b_Gm={};{}\x1b\\", m, chunk);
+                }
+            }
+            print!("\x1b[12A");
+            "\x1b[32G"
+        } else {
+            ""
         }
-        print!("\x1b[12A");
-
-        print!("\x1b_Ga=T,f=100,t=f,r=12,c=28;{}\x1b\\", b64_path);
-
-        print!("\x1b[12A");
-
-        "\x1b[32G"
     } else {
         ""
     };

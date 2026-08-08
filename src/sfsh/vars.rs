@@ -11,6 +11,7 @@ pub struct ShellVars {
     pub opts: HashMap<char, bool>,
     pub readonly: HashSet<String>,
     pub local_stack: Vec<HashMap<String, String>>,
+    pub argv0: String,
 }
 
 impl ShellVars {
@@ -24,6 +25,9 @@ impl ShellVars {
         opts.insert('e', false);
         opts.insert('u', false);
         opts.insert('x', false);
+        opts.insert('f', false);
+        opts.insert('p', false);
+        opts.insert('E', false);
 
         Self {
             vars: HashMap::new(),
@@ -35,6 +39,9 @@ impl ShellVars {
             opts,
             readonly: HashSet::new(),
             local_stack: Vec::new(),
+            argv0: std::env::args()
+                .next()
+                .unwrap_or_else(|| "sfsh".to_string()),
         }
     }
 
@@ -53,11 +60,7 @@ impl ShellVars {
                 }
                 Some(s)
             }
-            "0" => Some(
-                std::env::args()
-                    .next()
-                    .unwrap_or_else(|| "sfsh".to_string()),
-            ),
+            "0" => Some(self.argv0.clone()),
             "@" | "*" => {
                 if self.positional.is_empty() {
                     Some(String::new())
@@ -68,21 +71,33 @@ impl ShellVars {
             _ if name.chars().all(|c| c.is_ascii_digit()) && !name.is_empty() => {
                 let n: usize = name.parse().unwrap_or(0);
                 if n == 0 {
-                    Some(
-                        std::env::args()
-                            .next()
-                            .unwrap_or_else(|| "sfsh".to_string()),
-                    )
+                    Some(self.argv0.clone())
                 } else {
                     self.positional.get(n.saturating_sub(1)).cloned()
                 }
             }
+            _ if name.contains('[') && name.ends_with(']') => {
+                let base = name.split('[').next().unwrap_or("");
+
+                match base {
+                    "BASH_SOURCE" => Some(
+                        self.get("0")
+                            .unwrap_or_else(|| "sfsh".to_string()),
+                    ),
+                    "BASH_LINENO" => Some("1".to_string()),
+                    "FUNCNAME" => Some("main".to_string()),
+                    _ => None,
+                }
+            }
+            "EUID" => Some(unsafe { libc::geteuid() }.to_string()),
+            "UID" => Some(unsafe { libc::getuid() }.to_string()),
             _ => {
                 for frame in self.local_stack.iter().rev() {
                     if let Some(v) = frame.get(name) {
                         return Some(v.clone());
                     }
                 }
+
                 self.vars
                     .get(name)
                     .or_else(|| self.exported.get(name))

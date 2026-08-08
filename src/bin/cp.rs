@@ -6,6 +6,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::os::unix::ffi::OsStrExt;
 
 const VERSION: &str = "cp (sfc coreutils) 0.1.0";
 const HELP: &str = "Usage: cp [OPTION]... [-T] SOURCE DEST\n\
@@ -477,11 +478,10 @@ fn copy_dir(src: &Path, dest: &Path, opts: &Options) -> io::Result<()> {
     }
 
     fs::create_dir(dest)?;
+
+    let dest_c = std::ffi::CString::new(dest.as_os_str().as_bytes()).unwrap();
     unsafe {
-        libc::chmod(
-            dest.to_str().unwrap().as_ptr() as *const i8,
-            src_meta.mode() | 0o700,
-        );
+        libc::chmod(dest_c.as_ptr(), src_meta.mode() | 0o700);
     }
 
     for entry in fs::read_dir(src)? {
@@ -501,19 +501,12 @@ fn copy_dir(src: &Path, dest: &Path, opts: &Options) -> io::Result<()> {
 
     if opts.preserve_mode {
         unsafe {
-            libc::chmod(
-                dest.to_str().unwrap().as_ptr() as *const i8,
-                src_meta.mode(),
-            );
+            libc::chmod(dest_c.as_ptr(), src_meta.mode());
         }
     }
     if opts.preserve_ownership {
         unsafe {
-            libc::chown(
-                dest.to_str().unwrap().as_ptr() as *const i8,
-                src_meta.uid(),
-                src_meta.gid(),
-            );
+            libc::chown(dest_c.as_ptr(), src_meta.uid(), src_meta.gid());
         }
     }
     if opts.preserve_timestamps {
@@ -530,7 +523,7 @@ fn copy_dir(src: &Path, dest: &Path, opts: &Options) -> io::Result<()> {
         unsafe {
             libc::utimensat(
                 libc::AT_FDCWD,
-                dest.to_str().unwrap().as_ptr() as *const i8,
+                dest_c.as_ptr(),
                 times.as_ptr(),
                 0,
             );

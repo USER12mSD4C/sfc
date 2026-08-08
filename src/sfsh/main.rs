@@ -589,6 +589,17 @@ pub fn sfsh_main() -> Result<(), ReadlineError> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() > 2 && args[1] == "-c" {
+        if let Some(name) = args.get(3) {
+            vars.argv0 = name.clone();
+            vars.set_positional(args[4..].to_vec());
+        } else {
+            vars.argv0 = args
+                .get(0)
+                .cloned()
+                .unwrap_or_else(|| "sfsh".to_string());
+            vars.set_positional(Vec::new());
+        }
+
         let code = execute_script(
             &args[2],
             &mut vars,
@@ -600,8 +611,12 @@ pub fn sfsh_main() -> Result<(), ReadlineError> {
         shell_exit(code);
     }
 
-    if args.len() == 2 {
+    if args.len() >= 2 {
         let file = &args[1];
+
+        vars.argv0 = file.clone();
+        vars.set_positional(args[2..].to_vec());
+
         if let Ok(content) = std::fs::read_to_string(file) {
             let code = execute_script(
                 &content,
@@ -618,7 +633,7 @@ pub fn sfsh_main() -> Result<(), ReadlineError> {
         }
     }
 
-    let is_interactive = std::io::stdin().is_terminal();
+        let is_interactive = std::io::stdin().is_terminal();
 
     if !is_interactive {
         use std::io::Read;

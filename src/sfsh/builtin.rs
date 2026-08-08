@@ -331,14 +331,43 @@ fn builtin_set(args: &[String], vars: &mut ShellVars) -> i32 {
         }
         if (arg.starts_with('-') || arg.starts_with('+')) && arg.len() > 1 {
             let enable = arg.starts_with('-');
-            for c in arg[1..].chars() {
-                match c {
-                    'e' => vars.set_opt('e', enable),
-                    'u' => vars.set_opt('u', enable),
-                    'x' => vars.set_opt('x', enable),
-                    'f' => vars.set_opt('f', enable),
-                    _ => {}
+            let bytes = arg.as_bytes();
+            let mut j = 1;
+            while j < bytes.len() {
+                let c = bytes[j] as char;
+                if c == 'o' {
+                    let opt_name = if j + 1 < bytes.len() {
+                        &arg[j + 1..]
+                    } else {
+                        i += 1;
+                        if i < args.len() {
+                            args[i].as_str()
+                        } else {
+                            ""
+                        }
+                    };
+                    match opt_name {
+                        "pipefail" => vars.set_opt('p', enable),
+                        "errexit" => vars.set_opt('e', enable),
+                        "nounset" => vars.set_opt('u', enable),
+                        "xtrace" => vars.set_opt('x', enable),
+                        "noglob" => vars.set_opt('f', enable),
+                        "errtrace" => vars.set_opt('E', enable),
+                        _ => {}
+                    }
+                    break;
+                } else {
+                    match c {
+                        'e' => vars.set_opt('e', enable),
+                        'u' => vars.set_opt('u', enable),
+                        'x' => vars.set_opt('x', enable),
+                        'f' => vars.set_opt('f', enable),
+                        'E' => vars.set_opt('E', enable),
+                        'p' => vars.set_opt('p', enable),
+                        _ => {}
+                    }
                 }
+                j += 1;
             }
         } else {
             positional = Some(args[i..].to_vec());
@@ -369,7 +398,9 @@ fn builtin_read(args: &[String], vars: &mut ShellVars) -> i32 {
     let mut names: Vec<String> = Vec::new();
     let mut raw = false;
     let mut prompt: Option<String> = None;
+    let mut n_chars: Option<usize> = None;
     let mut i = 1;
+
     while i < args.len() {
         match args[i].as_str() {
             "-r" => raw = true,
@@ -377,29 +408,41 @@ fn builtin_read(args: &[String], vars: &mut ShellVars) -> i32 {
                 i += 1;
                 prompt = args.get(i).cloned();
             }
+            "-n" => {
+                i += 1;
+                n_chars = args.get(i).and_then(|s| s.parse().ok());
+            }
             _ if args[i].starts_with("-p") => {
                 prompt = Some(args[i][2..].to_string());
+            }
+            _ if args[i].starts_with("-n") => {
+                n_chars = args[i][2..].parse().ok();
             }
             _ => {
                 names.push(args[i].clone());
             }
         }
+
         i += 1;
     }
+
     if let Some(p) = &prompt {
         eprint!("{}", p);
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
+
     if names.is_empty() {
         names.push("REPLY".to_string());
     }
 
     let mut line = String::new();
+
     match std::io::stdin().read_line(&mut line) {
         Ok(0) => return 1,
         Ok(_) => {}
         Err(_) => return 1,
     }
+
     if line.ends_with('\n') {
         line.pop();
     }
@@ -407,6 +450,7 @@ fn builtin_read(args: &[String], vars: &mut ShellVars) -> i32 {
     if !raw {
         let mut result = String::new();
         let mut chars = line.chars().peekable();
+
         while let Some(c) = chars.next() {
             if c == '\\' {
                 if let Some(&next) = chars.peek() {
@@ -422,10 +466,16 @@ fn builtin_read(args: &[String], vars: &mut ShellVars) -> i32 {
             }
             result.push(c);
         }
+
         line = result;
     }
 
+    if let Some(n) = n_chars {
+        line = line.chars().take(n).collect();
+    }
+
     let ifs = vars.get("IFS").unwrap_or_else(|| " \t\n".to_string());
+
     if names.len() == 1 {
         vars.set(&names[0], &line, false);
     } else {
@@ -436,6 +486,7 @@ fn builtin_read(args: &[String], vars: &mut ShellVars) -> i32 {
                 .filter(|s| !s.is_empty())
                 .collect()
         };
+
         for (i, name) in names.iter().enumerate() {
             if i < names.len() - 1 {
                 let val = fields.get(i).copied().unwrap_or("");
@@ -450,6 +501,7 @@ fn builtin_read(args: &[String], vars: &mut ShellVars) -> i32 {
             }
         }
     }
+
     0
 }
 
@@ -485,13 +537,16 @@ fn test_expr(args: &[String]) -> i32 {
     if args.is_empty() {
         return 1;
     }
+
     if args[0] == "!" {
         let r = test_expr(&args[1..]);
         return if r == 0 { 1 } else { 0 };
     }
+
     if args[0] == "(" {
         let mut depth = 1;
         let mut end = 1;
+
         while end < args.len() && depth > 0 {
             if args[end] == "(" {
                 depth += 1;
@@ -500,7 +555,9 @@ fn test_expr(args: &[String]) -> i32 {
             }
             end += 1;
         }
+
         let r = test_expr(&args[1..end - 1]);
+
         if end < args.len() {
             if args[end] == "-a" {
                 return if r == 0 && test_expr(&args[end + 1..]) == 0 {
@@ -509,6 +566,7 @@ fn test_expr(args: &[String]) -> i32 {
                     1
                 };
             }
+
             if args[end] == "-o" {
                 return if r == 0 || test_expr(&args[end + 1..]) == 0 {
                     0
@@ -517,19 +575,38 @@ fn test_expr(args: &[String]) -> i32 {
                 };
             }
         }
+
         return r;
     }
+
     if args.len() == 1 {
         return if args[0].is_empty() { 1 } else { 0 };
     }
+
     if args.len() == 2 {
+        use std::os::unix::fs::MetadataExt;
+
         let a = &args[1];
+
+        let access_ok = |path: &str, mode: libc::c_int| -> bool {
+            match std::ffi::CString::new(path) {
+                Ok(c) => unsafe { libc::access(c.as_ptr(), mode) == 0 },
+                Err(_) => false,
+            }
+        };
+
+        let mode_of = |path: &str| -> Option<u32> {
+            std::fs::metadata(path)
+                .ok()
+                .map(|m| m.permissions().mode())
+        };
+
         match args[0].as_str() {
             "-z" => return if a.is_empty() { 0 } else { 1 },
             "-n" => return if a.is_empty() { 1 } else { 0 },
-            "-e" => return if Path::new(a).exists() { 0 } else { 1 },
-            "-f" => return if Path::new(a).is_file() { 0 } else { 1 },
-            "-d" => return if Path::new(a).is_dir() { 0 } else { 1 },
+            "-e" => return if std::path::Path::new(a).exists() { 0 } else { 1 },
+            "-f" => return if std::path::Path::new(a).is_file() { 0 } else { 1 },
+            "-d" => return if std::path::Path::new(a).is_dir() { 0 } else { 1 },
             "-h" | "-L" => {
                 return if std::fs::symlink_metadata(a)
                     .map(|m| m.file_type().is_symlink())
@@ -547,36 +624,12 @@ fn test_expr(args: &[String]) -> i32 {
                     1
                 }
             }
-            "-r" => {
-                let c_path = std::ffi::CString::new(a.as_str()).unwrap();
-                return if unsafe { libc::access(c_path.as_ptr(), libc::R_OK) } == 0 {
-                    0
-                } else {
-                    1
-                };
-            }
-            "-w" => {
-                let c_path = std::ffi::CString::new(a.as_str()).unwrap();
-                return if unsafe { libc::access(c_path.as_ptr(), libc::W_OK) } == 0 {
-                    0
-                } else {
-                    1
-                };
-            }
-            "-x" => {
-                let c_path = std::ffi::CString::new(a.as_str()).unwrap();
-                return if unsafe { libc::access(c_path.as_ptr(), libc::X_OK) } == 0 {
-                    0
-                } else {
-                    1
-                };
-            }
+            "-r" => return if access_ok(a, libc::R_OK) { 0 } else { 1 },
+            "-w" => return if access_ok(a, libc::W_OK) { 0 } else { 1 },
+            "-x" => return if access_ok(a, libc::X_OK) { 0 } else { 1 },
             "-b" => {
-                return if std::fs::metadata(a)
-                    .map(|m| {
-                        let mode = m.permissions().mode();
-                        (mode & libc::S_IFMT) == libc::S_IFBLK
-                    })
+                return if mode_of(a)
+                    .map(|mode| (mode & libc::S_IFMT) == libc::S_IFBLK)
                     .unwrap_or(false)
                 {
                     0
@@ -585,11 +638,8 @@ fn test_expr(args: &[String]) -> i32 {
                 }
             }
             "-c" => {
-                return if std::fs::metadata(a)
-                    .map(|m| {
-                        let mode = m.permissions().mode();
-                        (mode & libc::S_IFMT) == libc::S_IFCHR
-                    })
+                return if mode_of(a)
+                    .map(|mode| (mode & libc::S_IFMT) == libc::S_IFCHR)
                     .unwrap_or(false)
                 {
                     0
@@ -598,11 +648,8 @@ fn test_expr(args: &[String]) -> i32 {
                 }
             }
             "-p" => {
-                return if std::fs::metadata(a)
-                    .map(|m| {
-                        let mode = m.permissions().mode();
-                        (mode & libc::S_IFMT) == libc::S_IFIFO
-                    })
+                return if mode_of(a)
+                    .map(|mode| (mode & libc::S_IFMT) == libc::S_IFIFO)
                     .unwrap_or(false)
                 {
                     0
@@ -611,11 +658,71 @@ fn test_expr(args: &[String]) -> i32 {
                 }
             }
             "-S" => {
+                return if mode_of(a)
+                    .map(|mode| (mode & libc::S_IFMT) == libc::S_IFSOCK)
+                    .unwrap_or(false)
+                {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-u" => {
+                return if mode_of(a)
+                    .map(|mode| mode & libc::S_ISUID != 0)
+                    .unwrap_or(false)
+                {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-g" => {
+                return if mode_of(a)
+                    .map(|mode| mode & libc::S_ISGID != 0)
+                    .unwrap_or(false)
+                {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-k" => {
+                return if mode_of(a)
+                    .map(|mode| mode & libc::S_ISVTX != 0)
+                    .unwrap_or(false)
+                {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-G" => {
                 return if std::fs::metadata(a)
-                    .map(|m| {
-                        let mode = m.permissions().mode();
-                        (mode & libc::S_IFMT) == libc::S_IFSOCK
-                    })
+                    .ok()
+                    .map(|m| m.gid() == unsafe { libc::getegid() })
+                    .unwrap_or(false)
+                {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-O" => {
+                return if std::fs::metadata(a)
+                    .ok()
+                    .map(|m| m.uid() == unsafe { libc::geteuid() })
+                    .unwrap_or(false)
+                {
+                    0
+                } else {
+                    1
+                }
+            }
+            "-N" => {
+                return if std::fs::metadata(a)
+                    .ok()
+                    .map(|m| m.mtime() > m.atime())
                     .unwrap_or(false)
                 {
                     0
@@ -640,52 +747,90 @@ fn test_expr(args: &[String]) -> i32 {
             }
         }
     }
+
     if args.len() == 3 {
+        use std::os::unix::fs::MetadataExt;
+
+        let mtime_of = |path: &str| -> Option<std::time::SystemTime> {
+            std::fs::metadata(path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+        };
+
+        let file_newer = |a: &str, b: &str| -> bool {
+            match (mtime_of(a), mtime_of(b)) {
+                (Some(ta), Some(tb)) => ta > tb,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => false,
+            }
+        };
+
+        let same_file = |a: &str, b: &str| -> bool {
+            match (std::fs::metadata(a).ok(), std::fs::metadata(b).ok()) {
+                (Some(ma), Some(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+                _ => false,
+            }
+        };
+
+        let parse_int = |s: &str| -> Option<i64> { s.parse::<i64>().ok() };
+
         let (x, op, y) = (&args[0], &args[1], &args[2]);
+
         match op.as_str() {
             "=" | "==" => return if x == y { 0 } else { 1 },
             "!=" => return if x != y { 0 } else { 1 },
             "<" => return if x < y { 0 } else { 1 },
             ">" => return if x > y { 0 } else { 1 },
+            "-nt" => return if file_newer(x, y) { 0 } else { 1 },
+            "-ot" => return if file_newer(y, x) { 0 } else { 1 },
+            "-ef" => return if same_file(x, y) { 0 } else { 1 },
             "-eq" => {
-                return match (x.parse::<i64>(), y.parse::<i64>()) {
-                    (Ok(a), Ok(b)) if a == b => 0,
-                    _ => 1,
+                return match (parse_int(x), parse_int(y)) {
+                    (Some(a), Some(b)) if a == b => 0,
+                    (Some(_), Some(_)) => 1,
+                    _ => 2,
                 }
             }
             "-ne" => {
-                return match (x.parse::<i64>(), y.parse::<i64>()) {
-                    (Ok(a), Ok(b)) if a != b => 0,
-                    _ => 1,
+                return match (parse_int(x), parse_int(y)) {
+                    (Some(a), Some(b)) if a != b => 0,
+                    (Some(_), Some(_)) => 1,
+                    _ => 2,
                 }
             }
             "-gt" => {
-                return match (x.parse::<i64>(), y.parse::<i64>()) {
-                    (Ok(a), Ok(b)) if a > b => 0,
-                    _ => 1,
+                return match (parse_int(x), parse_int(y)) {
+                    (Some(a), Some(b)) if a > b => 0,
+                    (Some(_), Some(_)) => 1,
+                    _ => 2,
                 }
             }
             "-ge" => {
-                return match (x.parse::<i64>(), y.parse::<i64>()) {
-                    (Ok(a), Ok(b)) if a >= b => 0,
-                    _ => 1,
+                return match (parse_int(x), parse_int(y)) {
+                    (Some(a), Some(b)) if a >= b => 0,
+                    (Some(_), Some(_)) => 1,
+                    _ => 2,
                 }
             }
             "-lt" => {
-                return match (x.parse::<i64>(), y.parse::<i64>()) {
-                    (Ok(a), Ok(b)) if a < b => 0,
-                    _ => 1,
+                return match (parse_int(x), parse_int(y)) {
+                    (Some(a), Some(b)) if a < b => 0,
+                    (Some(_), Some(_)) => 1,
+                    _ => 2,
                 }
             }
             "-le" => {
-                return match (x.parse::<i64>(), y.parse::<i64>()) {
-                    (Ok(a), Ok(b)) if a <= b => 0,
-                    _ => 1,
+                return match (parse_int(x), parse_int(y)) {
+                    (Some(a), Some(b)) if a <= b => 0,
+                    (Some(_), Some(_)) => 1,
+                    _ => 2,
                 }
             }
             _ => {}
         }
     }
+
     if args.len() >= 3 {
         if args[1] == "-a" {
             return if test_expr(&args[0..1]) == 0 && test_expr(&args[2..]) == 0 {
@@ -694,6 +839,7 @@ fn test_expr(args: &[String]) -> i32 {
                 1
             };
         }
+
         if args[1] == "-o" {
             return if test_expr(&args[0..1]) == 0 || test_expr(&args[2..]) == 0 {
                 0
@@ -702,6 +848,7 @@ fn test_expr(args: &[String]) -> i32 {
             };
         }
     }
+
     1
 }
 

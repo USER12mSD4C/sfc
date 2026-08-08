@@ -15,20 +15,25 @@ pub fn lex(input: &str) -> Vec<Token> {
     let mut cs = input.chars().peekable();
     let mut pending_heredocs: Vec<(bool, String)> = Vec::new();
     let mut expect_heredoc: Option<bool> = None;
+    let mut in_cond = false;
 
     while let Some(&c) = cs.peek() {
         if c == '\n' {
             cs.next();
+
             if pending_heredocs.is_empty() {
                 t.push(Token::Newline);
             } else {
                 let pendings = std::mem::take(&mut pending_heredocs);
+
                 for (strip, delim) in pendings {
                     let body = read_heredoc_body(&mut cs, &delim, strip);
                     t.push(Token::HereBody(body));
                 }
+
                 t.push(Token::Newline);
             }
+
             continue;
         }
 
@@ -53,11 +58,13 @@ pub fn lex(input: &str) -> Vec<Token> {
             } else if op == "<<-" {
                 expect_heredoc = Some(true);
             }
+
             t.push(Token::Op(op));
             continue;
         }
 
         let w = read_word(&mut cs);
+
         if !w.is_empty() {
             if let Some(strip) = expect_heredoc.take() {
                 let (delim, _quoted) = parse_heredoc_delim(&w);
@@ -66,6 +73,7 @@ pub fn lex(input: &str) -> Vec<Token> {
 
             if let Ok(n) = w.parse::<u32>() {
                 let mut clone = cs.clone();
+
                 if let Some(op) = read_op(&mut clone) {
                     if is_redir_op(&op) {
                         t.push(Token::IoNumber(n));
@@ -73,9 +81,25 @@ pub fn lex(input: &str) -> Vec<Token> {
                     }
                 }
             }
-            t.push(Token::Word(parse_word(&w)));
+
+            let parsed = if in_cond {
+                parse_word_cond(&w)
+            } else {
+                parse_word(&w)
+            };
+
+            if w == "[[" {
+                in_cond = true;
+            }
+
+            if w == "]]" {
+                in_cond = false;
+            }
+
+            t.push(Token::Word(parsed));
         }
     }
+
     t.push(Token::Eof);
     t
 }
@@ -320,6 +344,7 @@ fn read_dollar_brace(cs: &mut std::iter::Peekable<std::str::Chars>) -> String {
 pub fn parse_word(s: &str) -> Word {
     let mut parts = Vec::new();
     let mut cs = s.chars().peekable();
+
     while let Some(&c) = cs.peek() {
         if c == '\'' {
             parts.push(read_squote(&mut cs));
@@ -330,10 +355,64 @@ pub fn parse_word(s: &str) -> Word {
         } else if c == '$' {
             parts.push(read_dollar(&mut cs));
         } else {
-            parts.push(read_lit(&mut cs));
+            let part = read_lit(&mut cs);
+
+            if let WordPart::Lit(ref text) = part {
+                if text.is_empty() {
+                    let ch = cs.next().unwrap();
+                    parts.push(WordPart::Lit(ch.to_string()));
+                    continue;
+                }
+            }
+
+            parts.push(part);
         }
     }
+
     Word(parts)
+}
+
+pub fn parse_word_cond(s: &str) -> Word {
+    let mut parts = Vec::new();
+    let mut cs = s.chars().peekable();
+
+    while let Some(&c) = cs.peek() {
+        if c == '\'' {
+            parts.push(read_squote(&mut cs));
+        } else if c == '"' {
+            parts.push(read_dquote(&mut cs));
+        } else if c == '$' {
+            parts.push(read_dollar(&mut cs));
+        } else {
+            parts.push(read_lit_cond(&mut cs));
+        }
+    }
+
+    Word(parts)
+}
+
+fn read_lit_cond(cs: &mut std::iter::Peekable<std::str::Chars>) -> WordPart {
+    let mut s = String::new();
+
+    while let Some(&c) = cs.peek() {
+        if c == '\'' || c == '"' || c == '$' || c == '`' {
+            break;
+        }
+
+        if c == '\\' {
+            s.push(c);
+            cs.next();
+            if let Some(x) = cs.next() {
+                s.push(x);
+            }
+            continue;
+        }
+
+        s.push(c);
+        cs.next();
+    }
+
+    WordPart::Lit(s)
 }
 
 fn read_squote(cs: &mut std::iter::Peekable<std::str::Chars>) -> WordPart {
@@ -498,15 +577,22 @@ fn read_dollar(cs: &mut std::iter::Peekable<std::str::Chars>) -> WordPart {
         name.push(c);
         cs.next();
     }
+
+    if name.is_empty() {
+        return WordPart::Lit("$".to_string());
+    }
+
     WordPart::Param(name, None)
 }
 
 fn read_lit(cs: &mut std::iter::Peekable<std::str::Chars>) -> WordPart {
     let mut s = String::new();
+
     while let Some(&c) = cs.peek() {
-        if c == '\'' || c == '"' || c == '~' || c == '$' || c == '`' {
+        if c == '\'' || c == '"' || c == '$' || c == '`' {
             break;
         }
+
         if c == '\\' {
             cs.next();
             if let Some(x) = cs.next() {
@@ -514,9 +600,11 @@ fn read_lit(cs: &mut std::iter::Peekable<std::str::Chars>) -> WordPart {
             }
             continue;
         }
+
         s.push(c);
         cs.next();
     }
+
     WordPart::Lit(s)
 }
 

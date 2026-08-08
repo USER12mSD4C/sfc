@@ -357,8 +357,28 @@ fn expand_part(
                 return;
             }
 
-            let val_opt = vars.get(name);
+            let mut clean_name = name.as_str();
+            if let Some(bracket_pos) = clean_name.find('[') {
+                clean_name = &clean_name[..bracket_pos];
+            }
+
+            let val_opt = match clean_name {
+                "BASH_SOURCE" => vars.get("0"),
+                "BASH_LINENO" => Some("1".to_string()),
+                "FUNCNAME" => Some("main".to_string()),
+                "EUID" => Some(unsafe { libc::geteuid() }.to_string()),
+                "UID" => Some(unsafe { libc::getuid() }.to_string()),
+                "SECONDS" => Some("0".to_string()),
+                "LINENO" => Some("1".to_string()),
+                _ => vars.get(clean_name),
+            };
+
             let unset = val_opt.is_none();
+
+            if unset && vars.opts.get(&'u').copied().unwrap_or(false) && op.is_none() {
+                eprintln!("sfsh: {}: unbound variable", clean_name);
+            }
+
             let mut val = val_opt.unwrap_or_default();
 
             if let Some(ref o) = op {

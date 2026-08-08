@@ -91,6 +91,12 @@ pub fn execute_script(
     let tokens = crate::sfsh::lexer::lex(input);
     let mut parser = crate::sfsh::parser::Parser::new(tokens);
     let ast = parser.parse();
+
+    if let Some(err) = parser.error() {
+        eprintln!("sfsh: syntax error: {}", err);
+        return 2;
+    }
+
     match execute_command(&ast, vars, aliases, funcs, jobs, shell_pgid, false, None) {
         ExecResult::Value(v) | ExecResult::Return(v) => v,
         ExecResult::Exit(v) => shell_exit(v),
@@ -124,11 +130,11 @@ pub fn execute_script_capture(
                 libc::close(fds[1]);
                 libc::setpgid(0, 0);
             }
-            
+
             let mut child_aliases = unsafe { std::ptr::read(aliases as *const _) };
             let mut child_funcs = unsafe { std::ptr::read(funcs as *const _) };
             let mut child_jobs = JobTable::new();
-            
+
             let code = execute_script(
                 input,
                 vars,
@@ -317,6 +323,26 @@ pub fn execute_command(
         },
         AstCommand::Brace(body) => {
             execute_command(body, vars, aliases, funcs, jobs, shell_pgid, false, None)
+        }
+        AstCommand::Not(body) => {
+            match execute_command(
+                body,
+                vars,
+                aliases,
+                funcs,
+                jobs,
+                shell_pgid,
+                background,
+                pgid,
+            ) {
+                ExecResult::Value(0) => ExecResult::Value(1),
+                ExecResult::Value(_) => ExecResult::Value(0),
+                other => other,
+            }
+        }
+        AstCommand::Cond(expr) => {
+            let ok = eval_cond(expr, vars, aliases, funcs);
+            ExecResult::Value(if ok { 0 } else { 1 })
         }
     }
 }
@@ -792,14 +818,22 @@ fn execute_pipeline(
     }
 
     let mut last_status = 0;
+    let pipefail = vars.opts.get(&'p').copied().unwrap_or(false);
+
     for child in children {
         loop {
             match waitpid(child, Some(WaitPidFlag::WUNTRACED)) {
                 Ok(status) => {
-                    last_status = extract_status(status);
+                    let st = extract_status(status);
+
+                    if !pipefail || st != 0 {
+                        last_status = st;
+                    }
+
                     break;
                 }
                 Err(nix::errno::Errno::EINTR) => continue,
+                Err(nix::errno::Errno::ECHILD) => break,
                 Err(e) => {
                     eprintln!("waitpid: {}", e);
                     break;
@@ -1061,5 +1095,374 @@ fn extract_status(status: WaitStatus) -> i32 {
         WaitStatus::Stopped(_, sig) => 128 + sig as i32,
         WaitStatus::Continued(_) => 0,
         _ => 1,
+    }
+}
+
+fn eval_cond(
+    expr: &crate::sfsh::ast::CondExpr,
+    vars: &mut ShellVars,
+    aliases: &HashMap<String, String>,
+    funcs: &HashMap<String, AstCommand>,
+) -> bool {
+    use crate::sfsh::ast::CondExpr;
+
+    match expr {
+        CondExpr::Or(left, right) => {
+            eval_cond(left, vars, aliases, funcs) || eval_cond(right, vars, aliases, funcs)
+        }
+        CondExpr::And(left, right) => {
+            eval_cond(left, vars, aliases, funcs) && eval_cond(right, vars, aliases, funcs)
+        }
+        CondExpr::Not(inner) => !eval_cond(inner, vars, aliases, funcs),
+        CondExpr::Paren(inner) => eval_cond(inner, vars, aliases, funcs),
+        CondExpr::Unary(op, word) => {
+            let val = expand_assignment(word, vars, aliases, funcs);
+            eval_cond_unary(op, &val)
+        }
+        CondExpr::Binary(op, left, right) => {
+            let lhs = expand_assignment(left, vars, aliases, funcs);
+            let rhs = expand_assignment(right, vars, aliases, funcs);
+
+            match op.as_str() {
+                "<" => lhs < rhs,
+                ">" => lhs > rhs,
+                "=" | "==" => {
+                    if cond_word_is_quoted(right) {
+                        lhs == rhs
+                    } else {
+                        match_glob(&rhs, &lhs)
+                    }
+                }
+                "!=" => {
+                    if cond_word_is_quoted(right) {
+                        lhs != rhs
+                    } else {
+                        !match_glob(&rhs, &lhs)
+                    }
+                }
+                "=~" => regex_match(&rhs, &lhs),
+                _ => false,
+            }
+        }
+    }
+}
+
+fn eval_cond_unary(op: &str, val: &str) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    match op {
+        "-z" => val.is_empty(),
+        "-n" => !val.is_empty(),
+        "-e" => std::path::Path::new(val).exists(),
+        "-f" => std::path::Path::new(val).is_file(),
+        "-d" => std::path::Path::new(val).is_dir(),
+        "-h" | "-L" => std::fs::symlink_metadata(val)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        "-s" => std::fs::metadata(val).map(|m| m.len() > 0).unwrap_or(false),
+        "-r" => cond_access(val, libc::R_OK),
+        "-w" => cond_access(val, libc::W_OK),
+        "-x" => cond_access(val, libc::X_OK),
+        "-b" | "-c" | "-p" | "-S" => {
+            let mode = std::fs::metadata(val)
+                .map(|m| m.permissions().mode())
+                .unwrap_or(0);
+
+            match op {
+                "-b" => (mode & libc::S_IFMT) == libc::S_IFBLK,
+                "-c" => (mode & libc::S_IFMT) == libc::S_IFCHR,
+                "-p" => (mode & libc::S_IFMT) == libc::S_IFIFO,
+                "-S" => (mode & libc::S_IFMT) == libc::S_IFSOCK,
+                _ => false,
+            }
+        }
+        "-t" => val
+            .parse::<i32>()
+            .map(|fd| unsafe { libc::isatty(fd) != 0 })
+            .unwrap_or(false),
+        "-u" | "-g" | "-k" => {
+            let mode = std::fs::metadata(val)
+                .map(|m| m.permissions().mode())
+                .unwrap_or(0);
+
+            match op {
+                "-u" => mode & libc::S_ISUID != 0,
+                "-g" => mode & libc::S_ISGID != 0,
+                "-k" => mode & libc::S_ISVTX != 0,
+                _ => false,
+            }
+        }
+        "-G" => std::fs::metadata(val)
+            .map(|m| m.gid() == unsafe { libc::getegid() })
+            .unwrap_or(false),
+        "-O" => std::fs::metadata(val)
+            .map(|m| m.uid() == unsafe { libc::geteuid() })
+            .unwrap_or(false),
+        "-N" => std::fs::metadata(val)
+            .map(|m| m.mtime() > m.atime())
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn cond_access(path: &str, mode: libc::c_int) -> bool {
+    match std::ffi::CString::new(path) {
+        Ok(c) => unsafe { libc::access(c.as_ptr(), mode) == 0 },
+        Err(_) => false,
+    }
+}
+
+fn cond_word_is_quoted(w: &Word) -> bool {
+    w.0.iter().any(|p| {
+        matches!(
+            p,
+            crate::sfsh::ast::WordPart::SQuote(_) | crate::sfsh::ast::WordPart::DQuote(_)
+        )
+    })
+}
+
+enum RegexKind {
+    Char(char),
+    Any,
+    Class(Vec<(char, char)>, bool),
+}
+
+struct RegexToken {
+    kind: RegexKind,
+    quant: Option<char>,
+}
+
+fn regex_match(pattern: &str, text: &str) -> bool {
+    let mut p = pattern;
+    let mut anchor_start = false;
+    let mut anchor_end = false;
+
+    if let Some(stripped) = p.strip_prefix('^') {
+        anchor_start = true;
+        p = stripped;
+    }
+
+    if let Some(stripped) = strip_unescaped_dollar(p) {
+        anchor_end = true;
+        p = stripped;
+    }
+
+    let tokens = match parse_regex_tokens(p) {
+        Some(t) => t,
+        None => return false,
+    };
+
+    let text_chars: Vec<char> = text.chars().collect();
+
+    if anchor_start {
+        regex_match_here(&tokens, 0, &text_chars, 0, anchor_end)
+    } else {
+        for start in 0..=text_chars.len() {
+            if regex_match_here(&tokens, 0, &text_chars, start, anchor_end) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+fn strip_unescaped_dollar(s: &str) -> Option<&str> {
+    if !s.ends_with('$') {
+        return None;
+    }
+
+    let bytes = s.as_bytes();
+    let mut backslashes = 0;
+    let mut i = bytes.len() as isize - 2;
+
+    while i >= 0 && bytes[i as usize] == b'\\' {
+        backslashes += 1;
+        i -= 1;
+    }
+
+    if backslashes % 2 == 0 {
+        Some(&s[..s.len() - 1])
+    } else {
+        None
+    }
+}
+
+fn parse_regex_tokens(p: &str) -> Option<Vec<RegexToken>> {
+    let chars: Vec<char> = p.chars().collect();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let kind = match chars[i] {
+            '\\' => {
+                i += 1;
+                if i >= chars.len() {
+                    return None;
+                }
+                let c = chars[i];
+                i += 1;
+                RegexKind::Char(c)
+            }
+            '.' => {
+                i += 1;
+                RegexKind::Any
+            }
+            '[' => {
+                let (kind, next) = parse_regex_class(&chars, i + 1)?;
+                i = next;
+                kind
+            }
+            c => {
+                i += 1;
+                RegexKind::Char(c)
+            }
+        };
+
+        let quant = if i < chars.len() && (chars[i] == '*' || chars[i] == '+' || chars[i] == '?') {
+            let q = chars[i];
+            i += 1;
+            Some(q)
+        } else {
+            None
+        };
+
+        tokens.push(RegexToken { kind, quant });
+    }
+
+    Some(tokens)
+}
+
+fn parse_regex_class(chars: &[char], mut i: usize) -> Option<(RegexKind, usize)> {
+    let mut negate = false;
+
+    if i < chars.len() && (chars[i] == '!' || chars[i] == '^') {
+        negate = true;
+        i += 1;
+    }
+
+    let mut ranges = Vec::new();
+
+    if i < chars.len() && chars[i] == ']' {
+        ranges.push((']', ']'));
+        i += 1;
+    }
+
+    while i < chars.len() && chars[i] != ']' {
+        let start = if chars[i] == '\\' {
+            i += 1;
+            if i >= chars.len() {
+                return None;
+            }
+            chars[i]
+        } else {
+            chars[i]
+        };
+
+        i += 1;
+
+        if i + 1 < chars.len() && chars[i] == '-' && chars[i + 1] != ']' {
+            i += 1;
+
+            let end = if chars[i] == '\\' {
+                i += 1;
+                if i >= chars.len() {
+                    return None;
+                }
+                chars[i]
+            } else {
+                chars[i]
+            };
+
+            i += 1;
+            ranges.push((start, end));
+        } else {
+            ranges.push((start, start));
+        }
+    }
+
+    if i >= chars.len() {
+        return None;
+    }
+
+    i += 1;
+
+    Some((RegexKind::Class(ranges, negate), i))
+}
+
+fn regex_match_here(
+    tokens: &[RegexToken],
+    ti: usize,
+    text: &[char],
+    si: usize,
+    anchor_end: bool,
+) -> bool {
+    if ti == tokens.len() {
+        return if anchor_end { si == text.len() } else { true };
+    }
+
+    let token = &tokens[ti];
+
+    match token.quant {
+        Some('*') => {
+            if regex_match_here(tokens, ti + 1, text, si, anchor_end) {
+                return true;
+            }
+
+            if si < text.len() && regex_match_one(&token.kind, text[si]) {
+                return regex_match_here(tokens, ti, text, si + 1, anchor_end);
+            }
+
+            false
+        }
+        Some('+') => {
+            if si < text.len() && regex_match_one(&token.kind, text[si]) {
+                if regex_match_here(tokens, ti + 1, text, si + 1, anchor_end) {
+                    return true;
+                }
+
+                return regex_match_here(tokens, ti, text, si + 1, anchor_end);
+            }
+
+            false
+        }
+        Some('?') => {
+            if regex_match_here(tokens, ti + 1, text, si, anchor_end) {
+                return true;
+            }
+
+            if si < text.len() && regex_match_one(&token.kind, text[si]) {
+                return regex_match_here(tokens, ti + 1, text, si + 1, anchor_end);
+            }
+
+            false
+        }
+        _ => {
+            si < text.len()
+                && regex_match_one(&token.kind, text[si])
+                && regex_match_here(tokens, ti + 1, text, si + 1, anchor_end)
+        }
+    }
+}
+
+fn regex_match_one(kind: &RegexKind, c: char) -> bool {
+    match kind {
+        RegexKind::Char(x) => c == *x,
+        RegexKind::Any => true,
+        RegexKind::Class(ranges, negate) => {
+            let mut ok = false;
+
+            for (a, b) in ranges {
+                if c >= *a && c <= *b {
+                    ok = true;
+                    break;
+                }
+            }
+
+            if *negate {
+                !ok
+            } else {
+                ok
+            }
+        }
     }
 }
